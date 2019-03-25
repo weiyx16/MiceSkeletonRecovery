@@ -123,7 +123,7 @@ class DataGenerator():
 			# TODO: about the bbox?
 			# box = list(map(int,line[1:5]))
 			box = [0,0,2047,2047] # use full image size
-			joints = list(map(int,line[5:])) # convert each joint location to int
+			joints = list(map(int,line[1:])) # convert each joint location to int
 			if joints == [-1] * len(joints):
 				self.no_intel.append(name)
 			else:
@@ -338,38 +338,39 @@ class DataGenerator():
 			train_weights = np.zeros((batch_size, len(self.joints_list)), np.float) # visibility of each joint
 			i = 0
 			while i < batch_size:
-				try:
-					if sample_set == 'train':
-						name = random.choice(self.train_set)
-					joints = self.data_dict[name]['joints']
-					box = self.data_dict[name]['box']
-					weight = np.asarray(self.data_dict[name]['weights'])
-					train_weights[i] = weight
+				if sample_set == 'train':
+					name = random.choice(self.train_set)
+				joints = self.data_dict[name]['joints']
+				box = self.data_dict[name]['box']
+				weight = np.asarray(self.data_dict[name]['weights'])
+				train_weights[i] = weight
 
-					img = self.open_img(name)
-					# Create the bounding box according to joints
-					# Notice cbox[0][1] is the center of the img
-					# and cbox[2][3] is the crop img size
-					padd, cbox = self._crop_data(img.shape[0], img.shape[1], box, joints, boxp = 0.2)
-					# joints location with relative representations
-					new_j = self._relative_joints(cbox, padd, joints, to_size=64)
-					gt_heatmap = self._generate_hm(64, 64, new_j, 64, weight) # size of gt_heatmap = 64*64*9
-					img = self._crop_img(img, padd, cbox)
+				img = self.open_img(name)
+				# Create the bounding box according to joints
+				# Notice cbox[0][1] is the center of the img
+				# and cbox[2][3] is the crop img size
+				padd, cbox = self._crop_data(img.shape[0], img.shape[1], box, joints, boxp = 0.2)
+				# joints location with relative representations
+				new_j = self._relative_joints(cbox, padd, joints, to_size=64)
+				gt_heatmap = self._generate_hm(64, 64, new_j, 64, weight) # size of gt_heatmap = 64*64*9
+				img = self._crop_img(img, padd, cbox)
 
-					img = img.astype(np.uint8)
-					img = scm.imresize(img, (256,256)) # 256,256,3
-					#img, gt_heatmap = self._augment(img, gt_heatmap)
-					gt_heatmap = np.expand_dims(gt_heatmap, axis = 0)
-					gt_heatmap = np.repeat(gt_heatmap, stacks, axis = 0)# convert to 4*64*64*9
-					# use stack = 4 for intermediate supervision
-					if normalize:
-						train_img[i] = img.astype(np.float) / 255
-					else :
-						train_img[i] = img.astype(np.float) # 4(natch_size)*256*256*3(RGB)
-					train_gtmap[i] = gt_heatmap # 4(batch_size)*4(nStack)*64*64*9(joints number)
-					i = i + 1
+				img = img.astype(np.uint8)
+				img = scm.imresize(img, (256,256)) # 256,256,3
+				#img, gt_heatmap = self._augment(img, gt_heatmap)
+				gt_heatmap = np.expand_dims(gt_heatmap, axis = 0)
+				gt_heatmap = np.repeat(gt_heatmap, stacks, axis = 0)# convert to 4*64*64*9
+				# use stack = 4 for intermediate supervision
+				if normalize:
+					train_img[i] = img.astype(np.float) / 255
+				else :
+					train_img[i] = img.astype(np.float) # 4(natch_size)*256*256*3(RGB)
+				train_gtmap[i] = gt_heatmap # 4(batch_size)*4(nStack)*64*64*9(joints number)
+				i = i + 1
+				'''
 				except :
 					print(' [!] Error file: ', name)
+				'''
 			yield train_img, train_gtmap, train_weights # It's really intelligent to use yield and next!!
 			
 	def generator(self, batchSize = 4, stacks = 4, norm = True, sample = 'train'):

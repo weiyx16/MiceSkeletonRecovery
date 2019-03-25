@@ -146,8 +146,12 @@ Use inference.py for prediction, and I don't know what yolo_net for? Maybe it's 
 ## Environment
 
 * python 3.6.8  
-* opencv ?  
+* opencv 3.4.2  
 * tensorflow-gpu 1.12.0  
 * numpy 1.16.2  
 * tqdm  
 * pillow  5.4.1  
+* Cuda 9.2  
+* Cudnn 7.3.1(install directly with conda..)  
+* Cupti 9.2.148  
+* Matplotlib 3.0.3  

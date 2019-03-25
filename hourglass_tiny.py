@@ -28,7 +28,7 @@ Abstract:
 """
 
 """
-	TODO: Maybe I need to convert all the tf.contrib to tf.nn
+	TODO: Maybe I need to calculate loss over joints number
 """
 import time
 import tensorflow as tf
@@ -91,6 +91,7 @@ class HourglassModel():
 		self.joints = joints
 		self.w_loss = w_loss
 		self.gpu_frac = gpu_frac
+		self.saver = None
 	
 	"""
 	# ---------------- Self-Parameters Accessor --------------
@@ -231,6 +232,14 @@ class HourglassModel():
 				for i in range(len(self.joints)):
 					tf.summary.scalar(self.joints[i], self.joint_accur[i], collections = ['train', 'test'])
 		
+		with tf.device(self.cpu):
+			self.saver = tf.train.Saver() #, keep_checkpoint_every_n_hours=2)
+
+		with tf.device(self.gpu):
+			self.train_summary = tf.summary.FileWriter(self.logdir_train, tf.get_default_graph())
+			self.test_summary = tf.summary.FileWriter(self.logdir_test)
+			#self.weight_summary = tf.summary.FileWriter(self.logdir_train, tf.get_default_graph()) # don't write down the summary of weighs for now
+		
 		# use merge_all to (use only sess.run for one time and apply ops on all in the train collection)
 		self.train_op = tf.summary.merge_all('train')
 		self.test_op = tf.summary.merge_all('test') # test_summary if for validation
@@ -266,7 +275,7 @@ class HourglassModel():
 		"""
 		print(">>>>> Begin training!")
 		with tf.name_scope('Train'):
-			self.generator = self.dataset.generator(self.batchSize, self.nStack, normalize = True, sample_set = 'train')
+			self.generator = self.dataset.generator(self.batchSize, self.nStack, norm = True, sample = 'train')
 			startTime = time.time()
 			self.resume = {}
 			# self.resume['accur'] = [] # for validation
@@ -278,7 +287,6 @@ class HourglassModel():
 				epochstartTime = time.time()
 				avg_cost = 0.
 				cost = 0.
-				print('-- Epoch: ' + str(epoch) + ' / ' + str(nEpochs) + ' begin \n')
 
 				# Training Part
 				for i in range(epochSize):
@@ -313,14 +321,16 @@ class HourglassModel():
 				self.train_summary.add_summary(weight_summary, epoch)
 				self.train_summary.flush()
 
-				print('-- Epoch ' + str(epoch) + '/' + str(nEpochs) + ' done in ' + str(int(epochfinishTime-epochstartTime)) + ' sec.\n'
+				print('\n-- Epoch ' + str(epoch) + '/' + str(nEpochs) + ' done in ' + str(int(epochfinishTime-epochstartTime)) + ' sec.\n'
 					 + ' - time_per_batch: ' + str(((epochfinishTime-epochstartTime)/epochSize))[:4] + ' sec.', ' - cost_per_batch: ' + str(avg_cost))
 
 				if cost < 1.2 * min_cost:
 					# Save model for each epoch
 					with tf.name_scope('save'):
-						self.saver.save(self.Session, os.path.join(self.model_save_dir,str(self.name + '_' + str(epoch + 1))))
-					min_cost = cost
+						self.saver.save(self.Session, os.path.join(self.model_save_dir, str(self.name)), global_step=epoch)
+					min_cost = min(cost, min_cost)
+				print('-- Saving new model with average cost: {}\n'.format(avg_cost))
+
 				self.resume['loss'].append(cost)
 				
 				# Validation Part
@@ -363,6 +373,11 @@ class HourglassModel():
 					try:
 						print('-- Loading Pre-trained Model')
 						load_t = time.time()
+						'''
+						ckpt = tf.train.get_checkpoint_state(pre_trained)
+						if ckpt and ckpt.model_checkpoint_path:
+							self.saver.restore(self.Session, ckpt.model_checkpoint_path)
+						'''
 						self.saver.restore(self.Session, pre_trained)
 						print('-- Pre-trained Model Loaded (', time.time() - load_t,' sec.)')
 						del load_t
@@ -378,14 +393,7 @@ class HourglassModel():
 		"""
 		if (self.logdir_train == None) or (self.logdir_test == None):
 			raise ValueError('Train/Test directory not assigned')
-		else:
-			with tf.device(self.cpu):
-				self.saver = tf.train.Saver(max_to_keep = 10) #, keep_checkpoint_every_n_hours=2)
-			if summary:
-				with tf.device(self.gpu):
-					self.train_summary = tf.summary.FileWriter(self.logdir_train, tf.get_default_graph())
-					self.test_summary = tf.summary.FileWriter(self.logdir_test)
-					#self.weight_summary = tf.summary.FileWriter(self.logdir_train, tf.get_default_graph()) # don't write down the summary of weighs for now
+			
 	
 	def _init_weight(self):
 		""" Initialize weights and session
@@ -451,9 +459,10 @@ class HourglassModel():
 				# Validing size: ceil(float(in_size-filter_size+1))/float(strides) 				
 				# Dim conv1 : batchsize x 128 x 128 x 64 (128 = ceil(260-6+1)/2)
 				# Why in source code use kernel_size = 7?
+
 				r1 = self._residual(conv1, numOut = 128, name = 'r1')
 				# Dim r1 : batchsize x 128 x 128 x 128 (channel from 64 to 128)
-				pool1 = tf.contrib.layers.max_pool2d(r1, [2,2], [2,2], padding='VALID')
+				pool1 = tf.contrib.layers.max_pool2d(r1, [2,2], [2,2], padding='VALID', data_format='NCHW')
 				# Dim pool1 : batchsize x 64 x 64 x 128
 
 				if self.tiny:
@@ -492,7 +501,9 @@ class HourglassModel():
 								else:
 									sum_[i] = tf.add_n([out_[i], ll[i], sum_[i-1]], name= 'merge')
 									# all of the three components have self,nFeat=256 channels (a little different from the paper)
-				return tf.stack(tf.transpose(out, [0,2,3,1]), axis = 1 , name = 'final_output') # out size =  batchsize * nstack * 64 * 64 * 9
+					for i in range(0, self.nStack):
+						out[i] = tf.transpose(out[i], [0,2,3,1])
+				return tf.stack(out, axis = 1 , name = 'final_output') # out size =  batchsize * nstack * 64 * 64 * 9
 				# stack: cascade the matrix from batchsize * 64 * 64 * 9 -> batchsize * nstack * 64 * 64 * 9 (put stacknumber in axis=1)
 
 			else:
@@ -516,6 +527,8 @@ class HourglassModel():
 								else:
 									sum_[i] = tf.add_n([out_[i], ll_[i], sum_[i-1]], name= 'merge')
 									# all of the three components have self,nFeat=256 channels (a little different from the paper)
+					for i in range(0, self.nStack):
+						out[i] = tf.transpose(out[i], [0,2,3,1])
 				return tf.stack(out, axis= 1 , name = 'final_output') # out size =  batchsize * nstack * 64 * 64 * 9
 
 	"""
@@ -635,7 +648,7 @@ class HourglassModel():
 		
 		Args:
 			inputs	: Input Tensor
-			n		: Number of downsampling step
+			n		: Number of downsampling step (level number)
 			numOut	: Number of Output Features (channels)
 			name	: Name of the block
 		"""
@@ -643,7 +656,7 @@ class HourglassModel():
 			# Upper Branch
 			up_1 = self._residual(inputs, numOut, name = 'up_1')
 			# Lower Branch
-			low_ = tf.contrib.layers.max_pool2d(inputs, [2,2], [2,2], padding='VALID') # downsampling with max pooling
+			low_ = tf.contrib.layers.max_pool2d(inputs, [2,2], [2,2], padding='VALID', data_format='NCHW') # downsampling with max pooling
 			# Valid in maxpooling: math.floor; Same: math.ceil
 			low_1= self._residual(low_, numOut, name = 'low_1')
 			
@@ -651,12 +664,14 @@ class HourglassModel():
 				low_2 = self._hourglass(low_1, n-1, numOut, name = 'low_2')
 			else:
 				low_2 = self._residual(low_1, numOut, name = 'low_2')
-				
+			
 			low_3 = self._residual(low_2, numOut, name = 'low_3')
 			# Use nearest_neighbor_interpole to upsample
-			# 4-D tensors: [batch, channels, height, width]
-			up_2 = tf.image.resize_nearest_neighbor(low_3, tf.shape(low_3)[2:4]*2, name = 'upsampling') # upsampling with nearest neighbor interpolation
-			return tf.add_n([up_2,up_1], name='out_hg')
+			# 4-D tensors: [batch, channels, height, width]	
+			low_3_shape = low_3.get_shape().as_list()
+			up_2 = tf.image.resize_nearest_neighbor(tf.transpose(low_3, [0,2,3,1]), [low_3_shape[2]*2, low_3_shape[3]*2], name = 'upsampling') # upsampling with nearest neighbor interpolation		
+			up_2 = tf.transpose(up_2, [0,3,1,2])	
+			return tf.add_n([up_2, up_1], name='out_hg')
 		
 	"""
 	# ---------- Model Accuracy Utils for Validation -------------
