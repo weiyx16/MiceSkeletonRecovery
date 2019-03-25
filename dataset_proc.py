@@ -3,8 +3,6 @@
 # reference format:
 # https://github.com/wbenbihi/hourglasstensorlfow
 
-# TODO: Do we really need boundbox?
-
 import os
 from shutil import copyfile
 

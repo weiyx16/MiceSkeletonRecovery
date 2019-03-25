@@ -62,6 +62,7 @@ if __name__ == '__main__':
 	dataset._randomize()
 	# dataset._create_sets(validation_rate=0.1) # No validation for now
 	
+	
 	# nfeats:256, nstacks:4 nmodules:1(not used)
 	# nlow:4 (Number of downsampling in one stack)
 	# mcam:false (attention system(not needed))

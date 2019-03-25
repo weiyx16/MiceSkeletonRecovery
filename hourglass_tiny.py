@@ -273,6 +273,7 @@ class HourglassModel():
 			# self.resume['err'] = []
 			self.resume['loss'] = []
 			
+			min_cost = 1e5
 			for epoch in tqdm(range(nEpochs), ncols=70):
 				epochstartTime = time.time()
 				avg_cost = 0.
@@ -315,9 +316,11 @@ class HourglassModel():
 				print('-- Epoch ' + str(epoch) + '/' + str(nEpochs) + ' done in ' + str(int(epochfinishTime-epochstartTime)) + ' sec.\n'
 					 + ' - time_per_batch: ' + str(((epochfinishTime-epochstartTime)/epochSize))[:4] + ' sec.', ' - cost_per_batch: ' + str(avg_cost))
 
-				# Save model for each epoch
-				with tf.name_scope('save'):
-					self.saver.save(self.Session, os.path.join(self.model_save_dir,str(self.name + '_' + str(epoch + 1))))
+				if cost < 1.2 * min_cost:
+					# Save model for each epoch
+					with tf.name_scope('save'):
+						self.saver.save(self.Session, os.path.join(self.model_save_dir,str(self.name + '_' + str(epoch + 1))))
+					min_cost = cost
 				self.resume['loss'].append(cost)
 				
 				# Validation Part
