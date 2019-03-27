@@ -1,32 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-Deep Human Pose Estimation
+Deep Mice Pose Estimation Using Stacked Hourglass Network
 
-Project by Walid Benbihi
-MSc Individual Project
-Imperial College
-Created on Mon Sep  4 18:11:46 2017
+Project by @Eason
+Adapted from @Walid Benbihi [source code]github : https://github.com/wbenbihi/hourglasstensorlfow/
 
-@author: Walid Benbihi
-@mail : w.benbihi(at)gmail.com
-@github : https://github.com/wbenbihi/hourglasstensorlfow/
-
-Abstract:
-	This python code creates a Stacked Hourglass Model
-	(Credits : A.Newell et al.)
-	(Paper : https://arxiv.org/abs/1603.06937)
-	
-	Code translated from 'anewell' github
-	Torch7(LUA) --> TensorFlow(PYTHON)
-	(Code : https://github.com/anewell/pose-hg-train)
-	
-	Modification are made and explained in the report
-	Goal : Achieve Real Time detection (Webcam)
-	----- Modifications made to obtain faster results (trade off speed/accuracy)
-	
-	This work is free of use, please cite the author if you use it!
-
+---
+Evaluation function
+---
 """
+
+# TODO: maybe you can add in yolo?
+
 import sys
 sys.path.append('./')
 
@@ -38,10 +23,7 @@ import scipy.io
 from train_launcher import process_config
 import cv2
 from predictClass import PredictProcessor
-from yolo_net import YOLONet
 from datagen import DataGenerator
-import config as cfg
-from filters import VideoFilters
 
 class Inference():
 	""" Inference Class
@@ -52,31 +34,29 @@ class Inference():
 		webcamSingle : Single Person Pose Estimation on Webcam Stream
 		webcamMultiple : Multiple Person Pose Estimation on Webcam Stream
 		webcamPCA : Single Person Pose Estimation with reconstruction error (PCA)
-		webcamYOLO : Object Detector
+		# webcamYOLO : Object Detector
 		predictHM : Returns Heat Map for an input RGB Image
 		predictJoints : Returns joint's location (for a 256x256 image)
 		pltSkeleton : Plot skeleton on image
-		runVideoFilter : SURPRISE !!!
 	"""
-	def __init__(self, config_file = 'config.cfg', model = 'hg_refined_tiny_200', yoloModel = 'YOLO_small.ckpt'):
+	def __init__(self, config_file = 'config.cfg', model = 'mice_tiny_hourglass-49'):
 		""" Initilize the Predictor
 		Args:
 			config_file 	 	: *.cfg file with model's parameters
-			model 	 	 	 	: *.index file's name. (weights to load) 
-			yoloModel 	 	: *.ckpt file (YOLO weights to load)
+			model 	 	 	 	: *.data-00000-of-00001 file's name. (weights to load) 
+			# yoloModel 	 	: *.ckpt file (YOLO weights to load)
 		"""
 		t = time()
 		params = process_config(config_file)
+		model = params['pretrained_model']
 		self.predict = PredictProcessor(params)
 		self.predict.color_palette()
 		self.predict.LINKS_JOINTS()
 		self.predict.model_init()
 		self.predict.load_model(load = model)
-		self.predict.yolo_init()
-		self.predict.restore_yolo(load = yoloModel)
 		self.predict._create_prediction_tensor()
-		self.filter = VideoFilters()
-		print('Done: ', time() - t, ' sec.')
+		print('-- Prediction Intialization Done: ', time() - t, ' sec.')
+		del t
 		
 	# -------------------------- WebCam Inference-------------------------------
 	def webcamSingle(self, thresh = 0.2, pltJ = True, pltL = True):
@@ -109,12 +89,6 @@ class Inference():
 		"""
 		self.predict.reconstructACPVideo(load = matrix, n = n)
 		
-	def webcamYOLO(self):
-		""" Run Object Detection on Webcam Stream
-		"""
-		cam = cv2.VideoCapture(0)
-		return self.predict.camera_detector( cam, wait=0, mirror = True)
-		
 	# ----------------------- Heat Map Prediction ------------------------------
 	
 	def predictHM(self, img):
@@ -122,18 +96,19 @@ class Inference():
 		Args:
 			img : Input Image -shape=(256x256x3) -value= uint8 (in [0, 255])
 		"""
-		return self.predict.pred(self, img / 255, debug = False, sess = None)
+		return self.predict.pred((img.astype(np.float32) / 255), sess = None)
 	# ------------------------- Joint Prediction -------------------------------
 	
 	def predictJoints(self, img, mode = 'cpu', thresh = 0.2):
 		""" Return Joint Location
-		/!\ Location with respect to 256x256 image
+		! Location with respect to 256x256 image
 		Args:
 			img : Input Image -shape=(256x256x3) -value= uint8 (in [0, 255])
 			mode : 'cpu' / 'gpu' Select a mode to compute joints' location
 			thresh : Joint Threshold
 		"""
 		SIZE = False
+		# fit to the model input (none*256*256*3)
 		if len(img.shape) == 3:
 			batch = np.expand_dims(img, axis = 0)
 			SIZE = True
@@ -144,7 +119,7 @@ class Inference():
 			if mode == 'cpu':
 				return self.predict.joints_pred_numpy(batch / 255, coord = 'img', thresh = thresh, sess = None)
 			elif mode == 'gpu':
-				return self.predict.joints_pred(batch / 255, coord = 'img', debug = False, sess = None)
+				return self.predict.joints_pred(batch / 255, coord = 'img', sess = None)
 			else :
 				print("Error : Mode should be 'cpu'/'gpu'")
 		else:
@@ -201,49 +176,6 @@ class Inference():
 			if good_link:
 				pos = self.predict.givePixel(l, j)
 				cv2.line(img_res, tuple(pos[0])[::-1], tuple(pos[1])[::-1], self.predict.links[i]['color'][::-1], thickness = 5)
-	
-	# -----------------------------  Filters -----------------------------------
-	
-	def runVideoFilter(self, debug = False):
-		""" WORK IN PROGRESS
-		Mystery Function
-		"""
-		thresh = 0.2
-		cam = cv2.VideoCapture(self.predict.src)
-		self.filter.activated_filters = [0]*self.filter.num_filters
-		while True:
-			t = time()
-			ret_val, img = cam.read()
-			img_res, img_hg = self.centerStream(img)
-			hg = self.predict.pred(img_hg / 255)
-			j = np.ones(shape = (self.predict.params['num_joints'],2)) * -1
-			for i in range(len(j)):
-				idx = np.unravel_index( hg[0,:,:,i].argmax(), (64,64))
-				if hg[0, idx[0], idx[1], i] > thresh:
-					j[i] = np.asarray(idx) * 800 / 64
-					if debug:
-						cv2.circle(img_res, center = tuple(j[i].astype(np.int))[::-1], radius= 5, color= self.predict.color[i][::-1], thickness= -1)
-			if debug:
-				print(j[9])
-				self.plotLimbs(img_res, j)
-			X = j.reshape((32,1),order = 'F')
-			_, angles = self.filter.angleAdir(X)
-			for f in range(len(self.filter.existing_filters)):
-				if np.sum(self.filter.activated_filters) > 0:
-					break
-				self.filter.activated_filters[f] = int(eval('self.filter.'+self.filter.existing_filters[f])(angles))
-			filter_to_activate = np.argmax(self.filter.activated_filters)
-			if self.filter.activated_filters[0] > 0:
-				img_res = eval('self.filter.'+self.filter.filter_func[filter_to_activate])(img_res, j)
-			fps = 1/(time()-t)
-			cv2.putText(img_res, str(self.filter.activated_filters[0]) +'- FPS: ' + str(fps)[:4], (60, 40), 2, 2, (0,0,0), thickness = 2)
-			cv2.imshow('stream', img_res)
-			if cv2.waitKey(1) == 27:
-				print('Stream Ended')
-				cv2.destroyAllWindows()
-				break
-		cv2.destroyAllWindows()
-		cam.release()
 			
 				
 		

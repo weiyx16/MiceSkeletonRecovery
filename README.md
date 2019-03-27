@@ -140,8 +140,10 @@ A special thanks to A.Newell for his answers. And to [bhack](https://github.com/
 * dataset_proc.py (transform data format from Deeplabcut to StackedHG);  
 * hourglass_tiny.py (model definition);  
 * train_launcher.py (main function);  
+* inference.py (evalution tools function);  
+* Single_img_evaluation (evaluation on singel image)  
 
-Use inference.py for prediction, and I don't know what yolo_net for? Maybe it's for testing to crop the image automatically.  
+Yolo_net is for testing to crop the image automatically.  
 
 ## Environment
 

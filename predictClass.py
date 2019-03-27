@@ -60,24 +60,25 @@ class PredictProcessor():
 			config_dict	: config_dict
 		"""
 		self.params = config_dict
-		self.HG = HourglassModel(nFeat= self.params['nfeats'], nStack = self.params['nstacks'], 
-						nModules = self.params['nmodules'], nLow = self.params['nlow'], outputDim = self.params['num_joints'], 
-						batch_size = self.params['batch_size'], drop_rate = self.params['dropout_rate'], lear_rate = self.params['learning_rate'],
-						decay = self.params['learning_rate_decay'], decay_step = self.params['decay_step'], dataset = None, training = False,
-						w_summary = True, logdir_test = self.params['log_dir_test'],
-						logdir_train = self.params['log_dir_test'], tiny = self.params['tiny'], 
-						modif = False, name = self.params['name'], attention = self.params['mcam'], w_loss=self.params['weighted_loss'] , joints= self.params['joint_list'])
+		self.HG = HourglassModel(nFeat=self.params['nfeats'], nStack=self.params['nstacks'], nModules=self.params['nmodules'], 
+			nLow=self.params['nlow'], outputDim=self.params['num_joints'], batch_size=self.params['batch_size'], training=True, 
+			drop_rate= self.params['dropout_rate'], lear_rate=self.params['learning_rate'], decay=self.params['learning_rate_decay'], decay_step=self.params['decay_step'], 
+			name=self.params['name'], w_summary = True, logdir_train=self.params['log_dir_train'], logdir_test=self.params['log_dir_test'], tiny= self.params['tiny'],
+			w_loss=self.params['weighted_loss'] , joints= self.params['joint_list'], gpu_frac=self.params['gpu_frac'], model_save_dir=self.params['model_save_dir'])
 		self.graph = tf.Graph()
 		self.src = 0
 		self.cam_res = (480,640)
-		
+	
+	"""
+		---------------- Color_palette and Skeleton definition -------------
+	"""
 	def color_palette(self):
 		""" Creates a color palette dictionnary
 		Drawing Purposes
 		You don't need to modify this function.
 		In case you need other colors, add BGR color code to the color list
 		and make sure to give it a name in the color_name list
-		/!\ Make sure those 2 lists have the same size
+		Make sure those 2 lists have the same size
 		"""
 		#BGR COLOR CODE
 		self.color = [(241,242,224), (196,203,128), (136,150,0), (64,77,0), 
@@ -95,12 +96,7 @@ class PredictProcessor():
 				'lightblue01', 'lightblue02', 'lightblue03', 'lightblue04',
 				'purple01', 'purple02', 'purple03', 'purple04',
 				'red01', 'red02', 'red03', 'red04']
-		self.classes_name =  ["aeroplane", "bicycle", "bird",
-				"boat", "bottle", "bus", "car", "cat", "chair",
-				"cow", "diningtable", "dog", "horse", "motorbike",
-				"person", "pottedplant", "sheep",
-				"sofa", "train","tvmonitor"]
-		# Person ID = 14
+
 		self.color_class = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
 		self.palette = {}
 		for i, name in enumerate(self.color_name):
@@ -108,8 +104,7 @@ class PredictProcessor():
 			
 	def LINKS_JOINTS(self):
 		""" Defines links to be joined for visualization
-		Drawing Purposes
-		You may need to modify this function
+		Drawing Purposes TODO:
 		"""
 		self.links = {}
 		# Edit Links with your needed skeleton
@@ -117,11 +112,7 @@ class PredictProcessor():
 		self.LINKS_ACP = [(0,1),(1,2),(3,4),(4,5),(7,8),(8,9),(10,11),(11,12)]
 		color_id = [1,2,3,3,2,1,5,27,26,25,27,26,25]
 		self.color_id_acp = [8,9,9,8,19,20,20,19]
-		# 13 joints version
-		#LINKS = [(0,1),(1,2),(2,3),(3,4),(4,5),(6,7),(6,11),(11,12),(12,13),(6,11),(10,9),(9,8)]
-		#color_id = [1,2,3,2,1,0,27,26,25,27,26,25]
-		# 10 lines version
-		# LINKS = [(0,1),(1,2),(3,4),(4,5),(6,8),(8,9),(13,14),(14,15),(12,11),(11,10)]
+
 		for i in range(len(LINKS)):
 			self.links[i] = {'link' : LINKS[i], 'color' : self.palette[self.color_name[color_id[i]]]}
 	
@@ -145,58 +136,58 @@ class PredictProcessor():
 		"""
 		return (joints[link[0]].astype(np.int), joints[link[1]].astype(np.int))
 	
-	# ---------------------------MODEL METHODS---------------------------------
+	"""
+		---------------------------MODEL METHODS---------------------------------
+	"""
+	
 	def model_init(self):
 		""" Initialize the Hourglass Model
 		"""
 		t = time()
 		with self.graph.as_default():
 			self.HG.generate_model()
-		print('Graph Generated in ', int(time() - t), ' sec.')
+		print('>>>>> Graph Generated in ', int(time() - t), ' sec.')
+		del t
 	
 	def load_model(self, load = None):
 		""" Load pretrained weights (See README)
 		Args:
 			load : File to load
 		"""
+		t = time()
 		with self.graph.as_default():
 			self.HG.restore(load)
-		
-	def _create_joint_tensor(self, tensor, name = 'joint_tensor',debug = False):
+		print('>>>>> Model loaded in ', int(time() - t), ' sec.')
+		del t
+
+	def _create_joint_tensor(self, tensor, name = 'joint_tensor'):
 		""" TensorFlow Computation of Joint Position
 		Args:
-			tensor		: Prediction Tensor Shape [nbStack x 64 x 64 x outDim] or [64 x 64 x outDim]
+			tensor		: Prediction Tensor Shape [nbStack x 64 x 64 x outDim](joint_tensor) or [64 x 64 x outDim](joint_tensor_final)
 			name		: name of the tensor
 		Returns:
-			out			: Tensor of joints position
+			out			: Tensor of joints position shape=(outputdim*2)
 		
 		Comment:
 			Genuinely Agreeing this tensor is UGLY. If you don't trust me, look at
 			'prediction' node in TensorBoard.
 			In my defence, I implement it to compare computation times with numpy.
 		"""
+		joints = None
 		with tf.name_scope(name):
 			shape = tensor.get_shape().as_list()
-			if debug:
-				print(shape)
-			if len(shape) == 3:
-				resh = tf.reshape(tensor[:,:,0], [-1])
-			elif len(shape) == 4:
-				resh = tf.reshape(tensor[-1,:,:,0], [-1])
-			if debug:
-				print(resh)
-			arg = tf.arg_max(resh,0)
-			if debug:
-				print(arg, arg.get_shape(), arg.get_shape().as_list())
-			joints = tf.expand_dims(tf.stack([arg // tf.to_int64(shape[1]), arg % tf.to_int64(shape[1])], axis = -1), axis = 0)
-			for i in range(1, shape[-1]):
+			for i in range(shape[-1]): # shape[-1]=9
 				if len(shape) == 3:
 					resh = tf.reshape(tensor[:,:,i], [-1])
 				elif len(shape) == 4:
 					resh = tf.reshape(tensor[-1,:,:,i], [-1])
-				arg = tf.arg_max(resh,0)
-				j = tf.expand_dims(tf.stack([arg // tf.to_int64(shape[1]), arg % tf.to_int64(shape[1])], axis = -1), axis = 0)
-				joints = tf.concat([joints, j], axis = 0)
+				arg = tf.argmax(resh,0)
+				j = tf.expand_dims(tf.stack([arg // tf.to_int64(shape[1]), arg % tf.to_int64(shape[1])], axis = -1), axis = 0) # shape = (1,2)
+				if i==0:
+					joints = j
+				else:
+					joints = tf.concat([joints, j], axis = 0)
+				# joints is 9*2
 			return tf.identity(joints, name = 'joints')
 			
 	def _create_prediction_tensor(self):
@@ -207,10 +198,8 @@ class PredictProcessor():
 				self.HG.pred_sigmoid = tf.nn.sigmoid(self.HG.output[:,self.HG.nStack - 1], name= 'sigmoid_final_prediction')
 				self.HG.pred_final = self.HG.output[:,self.HG.nStack - 1]
 				self.HG.joint_tensor = self._create_joint_tensor(self.HG.output[0], name = 'joint_tensor')
-				self.HG.joint_tensor_final = self._create_joint_tensor(self.HG.output[0,-1] , name = 'joint_tensor_final')
-		print('Prediction Tensors Ready!')
-	
-	
+				self.HG.joint_tensor_final = self._create_joint_tensor(self.HG.output[0,-1] , name = 'joint_tensor_final') # -1 means the last stack
+		print('-- Prediction Tensors Ready!')
 	
 	#----------------------------PREDICTION METHODS----------------------------
 	def predict_coarse(self, img, debug = False, sess = None):
@@ -237,18 +226,15 @@ class PredictProcessor():
 			print('Pred: ', time() - t, ' sec.')
 		return out
 	
-	def pred(self, img, debug = False, sess = None):
+	def pred(self, img, sess = None):
 		""" Given a 256 x 256 image, Returns prediction Tensor
 		This prediction method returns values in [0,1]
 		Use this method for inference
 		Args:
 			img		: Image -Shape (256 x256 x 3) -Type : float32
-			debug	: (bool) True to output prediction time
 		Returns:
 			out		: Array -Shape (64 x 64 x outputDim) -Type : float32
 		"""
-		if debug:
-			t = time()
 		if img.shape == (256,256,3):
 			if sess is None:
 				out = self.HG.Session.run(self.HG.pred_sigmoid, feed_dict={self.HG.img : np.expand_dims(img, axis = 0)})
@@ -257,49 +243,26 @@ class PredictProcessor():
 		else:
 			print('Image Size does not match placeholder shape')
 			raise Exception
-		if debug:
-			print('Pred: ', time() - t, ' sec.')
 		return out
 	
-	def joints_pred(self, img, coord = 'hm', debug = False, sess = None):
+	def joints_pred(self, img, coord = 'hm', sess = None):
 		""" Given an Image, Returns an array with joints position
 		Args:
 			img		: Image -Shape (256 x 256 x 3) -Type : float32 
 			coord	: 'hm'/'img' Give pixel coordinates relative to heatMap('hm') or Image('img')
-			debug	: (bool) True to output prediction time
 		Returns
 			out		: Array -Shape(num_joints x 2) -Type : int
 		"""
-		if debug:
-			t = time()
-			if sess is None:
-				j1 = self.HG.Session.run(self.HG.joint_tensor, feed_dict = {self.HG.img: img})
-			else:
-				j1 = sess.run(self.HG.joint_tensor, feed_dict = {self.HG.img: img})
-			print('JT:', time() - t)
-			t = time()
-			if sess is None:
-				j2 = self.HG.Session.run(self.HG.joint_tensor_final, feed_dict = {self.HG.img: img})
-			else:
-				j2 = sess.run(self.HG.joint_tensor_final, feed_dict = {self.HG.img: img})
-			print('JTF:', time() - t)
-			if coord == 'hm':
-				return j1, j2
-			elif coord == 'img':
-				return j1 * self.params['img_size'] / self.params['hm_size'], j2 *self.params['img_size'] / self.params['hm_size']
-			else:
-				print("Error: 'coord' argument different of ['hm','img']")
+		if sess is None:
+			j = self.HG.Session.run(self.HG.joint_tensor_final, feed_dict = {self.HG.img: img})
 		else:
-			if sess is None:
-				j = self.HG.Session.run(self.HG.joint_tensor_final, feed_dict = {self.HG.img: img})
-			else:
-				j = sess.run(self.HG.joint_tensor_final, feed_dict = {self.HG.img: img})
-			if coord == 'hm':
-				return j
-			elif coord == 'img':
-				return j * self.params['img_size'] / self.params['hm_size']
-			else:
-				print("Error: 'coord' argument different of ['hm','img']")
+			j = sess.run(self.HG.joint_tensor_final, feed_dict = {self.HG.img: img})
+		if coord == 'hm':
+			return j
+		elif coord == 'img':
+			return j * self.params['img_size'] / self.params['hm_size']
+		else:
+			print("Error: 'coord' argument different of ['hm','img']")
 				
 	def joints_pred_numpy(self, img, coord = 'hm', thresh = 0.2, sess = None):
 		""" Create Tensor for joint position prediction
@@ -322,28 +285,6 @@ class PredictProcessor():
 					joints[i] = np.array(index) * self.params['img_size'] / self.params['hm_size']
 		return joints
 			
-	def batch_pred(self, batch, debug = False):
-		""" Given a 256 x 256 images, Returns prediction Tensor
-		This prediction method returns values in [0,1]
-		Use this method for inference
-		Args:
-			batch	: Batch -Shape (batchSize x 256 x 256 x 3) -Type : float32
-			debug	: (bool) True to output prediction time
-		Returns:
-			out		: Array -Shape (batchSize x 64 x 64 x outputDim) -Type : float32
-		"""
-		if debug:
-			t = time()
-		if batch[0].shape == (256,256,3):
-			out = self.HG.Session.run(self.HG.pred_sigmoid, feed_dict={self.HG.img : batch})
-		else:
-			print('Image Size does not match placeholder shape')
-			raise Exception
-		if debug:
-			print('Pred: ', time() - t, ' sec.')
-		return out
-	
-	
 	#-------------------------------PLOT FUNCTION------------------------------
 	def plt_skeleton(self, img, tocopy = True, debug = False, sess = None):
 		""" Given an Image, returns Image with plotted limbs (TF VERSION)
@@ -1276,16 +1217,3 @@ class PredictProcessor():
 				cap.release()
 		cv2.destroyAllWindows()
 		cap.release()
-		
-if __name__ == '__main__':
-	t = time()
-	params = process_config('configTiny.cfg')
-	predict = PredictProcessor(params)
-	predict.color_palette()
-	predict.LINKS_JOINTS()
-	predict.model_init()
-	predict.load_model(load = 'hg_refined_tiny_200')
-	predict.yolo_init()
-	predict.restore_yolo(load = 'YOLO_small.ckpt')
-	predict._create_prediction_tensor()
-	print('Done: ', time() - t, ' sec.')

@@ -1,30 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Deep Mice Pose Estimation
+Deep Mice Pose Estimation Using Stacked Hourglass Network
 
-Project by Walid Benbihi
-MSc Individual Project
-Imperial College
-Created on Mon Jul 10 19:13:56 2017
+Project by @Eason
+Adapted from @Walid Benbihi [source code]github : https://github.com/wbenbihi/hourglasstensorlfow/
 
-@author: Walid Benbihi
-@mail : w.benbihi(at)gmail.com
-@github : https://github.com/wbenbihi/hourglasstensorlfow/
-
-Abstract:
-	This python code creates a Stacked Hourglass Model
-	(Credits : A.Newell et al.)
-	(Paper : https://arxiv.org/abs/1603.06937)
-	
-	Code translated from 'anewell' github
-	Torch7(LUA) --> TensorFlow(PYTHON)
-	(Code : https://github.com/anewell/pose-hg-train)
-	
-	Modification are made and explained in the report
-	Goal : Achieve Real Time detection (Webcam)
-	----- Modifications made to obtain faster results (trade off speed/accuracy)
-	
-	This work is free of use, please cite the author if you use it!
+---
+Model and Training function
+---
 """
 
 """
@@ -46,7 +29,7 @@ class HourglassModel():
 	"""
 	def __init__(self, gpu_frac = 0.75, nFeat = 256, nStack = 4, nModules = 1, nLow = 4, outputDim = 9, batch_size = 4, 
 		drop_rate = 0.2, lear_rate = 2.5e-4, decay = 0.96, decay_step = 100, dataset = None, training = True, 
-		w_summary = True, logdir_train = None, logdir_test = None, tiny = True, modif = False,
+		w_summary = True, logdir_train = None, logdir_test = None, tiny = True,
 		w_loss = False, name = 'mice_tiny_hourglass', model_save_dir = None, joints = ['nose','r_ear','l_ear','rf_leg','lf_leg','rb_leg','lb_leg','tail_base','tail_end']):
 		""" Initializer
 		Args:
@@ -64,7 +47,6 @@ class HourglassModel():
 			w_summary			: (bool) True/False for summary of weight (to visualize in Tensorboard) (set true)
 			w_loss				: (bool) used to weighted loss (didn't calculate loss on unvisible joints)
 			tiny				: (bool) Activate Tiny Hourglass
-			modif				: (bool) Boolean to test some network modification # DO NOT USE IT ! USED TO TEST THE NETWORK (set false)
 			name				: name of the model
 		"""
 		self.nStack = nStack
@@ -81,7 +63,6 @@ class HourglassModel():
 		self.name = name
 		self.decay_step = decay_step
 		self.nLow = nLow
-		self.modif = modif
 		self.dataset = dataset
 		self.cpu = '/cpu:0'
 		self.gpu = '/gpu:0'
@@ -327,7 +308,7 @@ class HourglassModel():
 				if cost < 1.2 * min_cost:
 					# Save model for each epoch
 					with tf.name_scope('save'):
-						self.saver.save(self.Session, os.path.join(self.model_save_dir, str(self.name)), global_step=epoch)
+						self.saver.save(self.Session, os.path.join(self.model_save_dir, str(self.name)), global_step=epoch+1)
 					min_cost = min(cost, min_cost)
 				print('-- Saving new model with average cost: {}\n'.format(avg_cost))
 
@@ -410,7 +391,7 @@ class HourglassModel():
 	# --------------- Model Eavluation --------------
 	"""
 	
-	def restore(self, load = None):
+	def restore(self, pre_trained = None):
 		""" Restore a pretrained model (`During evaluation`)
 			Args:
 			load	: Model to load (None if training from scratch) (see README for further information)
@@ -419,11 +400,11 @@ class HourglassModel():
 			with tf.device(self.gpu):
 				self._init_session()
 				self._define_saver_summary(summary = False)
-				if load is not None:
-					print('Loading Trained Model')
+				if pre_trained is not None:
+					print('-- Loading Trained Model')
 					t = time.time()
-					self.saver.restore(self.Session, load)
-					print('Model Loaded (', time.time() - t,' sec.)')
+					self.saver.restore(self.Session, pre_trained)
+					print('-- Model Loaded (', time.time() - t,' sec.)')
 				else:
 					print('Please give a Model in args (see README for further information)')
 

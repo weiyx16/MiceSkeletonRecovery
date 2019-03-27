@@ -1,6 +1,12 @@
 """
-	Main function
-	Trainer Launch
+Deep Mice Pose Estimation Using Stacked Hourglass Network
+
+Project by @Eason
+Adapted from @Walid Benbihi [source code]github : https://github.com/wbenbihi/hourglasstensorlfow/
+
+---
+Main function
+---
 """
 
 import configparser
@@ -42,6 +48,9 @@ def process_config(conf_file):
 		if section == 'Saver':
 			for option in config.options(section):
 				params[option] = eval(config.get(section, option))
+		if section == 'Evaluation':
+			for option in config.options(section):
+				params[option] = eval(config.get(section, option))
 	return params
 
 
@@ -74,7 +83,7 @@ if __name__ == '__main__':
 		nLow=params['nlow'], outputDim=params['num_joints'], batch_size=params['batch_size'], training=True, 
 		drop_rate= params['dropout_rate'], lear_rate=params['learning_rate'], decay=params['learning_rate_decay'], decay_step=params['decay_step'], 
 		dataset=dataset, name=params['name'], w_summary = True, logdir_train=params['log_dir_train'], logdir_test=params['log_dir_test'], tiny= params['tiny'],
-		w_loss=params['weighted_loss'] , joints= params['joint_list'], modif=False, gpu_frac=params['gpu_frac'], model_save_dir=params['model_save_dir'])
+		w_loss=params['weighted_loss'] , joints= params['joint_list'], gpu_frac=params['gpu_frac'], model_save_dir=params['model_save_dir'])
 	
 	print('>>>>> Creating Hourglass Model')
 	model.generate_model()
