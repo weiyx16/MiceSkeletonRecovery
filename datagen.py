@@ -102,10 +102,8 @@ class DataGenerator():
 		for line in input_file:
 			line = line.strip().split(' ')
 			name = line[0]
-			# TODO: about the bbox?
-			# box = list(map(int,line[1:5]))
-			box = [0,0,2047,2047] # use full image size
-			joints = list(map(int,line[1:])) # convert each joint location to int
+			box = list(map(int,line[1:5]))
+			joints = list(map(int,line[5:])) # convert each joint location to int
 			if joints == [-1] * len(joints):
 				self.no_intel.append(name)
 			else:
