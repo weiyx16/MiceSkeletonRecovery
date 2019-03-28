@@ -272,7 +272,7 @@ class HourglassModel():
 				# Training Part
 				for i in range(epochSize):
 					img_train, gt_train, weight_train = next(self.generator)
-					if i % saveStep == 0:
+					if i % saveStep == saveStep - 1:
 						if self.w_loss:
 							_, cur_loss, summary = self.Session.run([self.train_rmsprop, self.loss, self.train_op], 
 								feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.weights: weight_train})
