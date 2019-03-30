@@ -283,7 +283,8 @@ class DataGenerator():
 		"""
 		img = np.pad(img, padding, mode = 'constant')
 		max_lenght = max(crop_box[2], crop_box[3]) # choose max in width and height for sure that it's a square.
-		img = img[crop_box[1] - max_lenght //2:crop_box[1] + max_lenght //2, crop_box[0] - max_lenght // 2:crop_box[0] + max_lenght //2]
+		crop_size = max_lenght //2
+		img = img[crop_box[1]-crop_size : crop_box[1]+crop_size, crop_box[0]-crop_size : crop_box[0]+crop_size]
 		return img
 	
 	def _relative_joints(self, box, padding, joints, to_size = 64):
@@ -297,7 +298,7 @@ class DataGenerator():
 		new_j = np.copy(joints)
 		max_l = max(box[2], box[3])
 		new_j = new_j + [padding[1][0], padding[0][0]]
-		new_j = new_j - [box[0] - max_l //2,box[1] - max_l //2]
+		new_j = new_j - [box[0] - max_l //2, box[1] - max_l //2]
 		new_j = new_j * to_size / (max_l + 0.0000001)
 		return new_j.astype(np.int32)
 	
