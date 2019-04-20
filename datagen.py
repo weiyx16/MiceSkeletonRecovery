@@ -53,7 +53,7 @@ class DataGenerator():
 	How to generate Dataset:
 		Create a TEXT file with the following structure:
 			image_name.jpg[LETTER] box_xmin box_ymin box_xmax b_ymax joints
-			[LETTER]: (Don't need yet)
+			[LETTER]: (Not need yet)
 				One image can contain multiple mice. To use the same image
 				finish the image with a CAPITAL letter [A,B,C...] for 
 				first/second/third... mice in the image
@@ -70,7 +70,7 @@ class DataGenerator():
 			train_data_file		: Text file with training set data
 		"""
 		if joints_name == None:
-			self.joints_list = ['nose','r_ear','l_ear','rf_leg','lf_leg','rb_leg','lb_leg','tail_base','tail_end']
+			self.joints_list = ['nose','r_ear','l_ear','tail_base'] #['nose','r_ear','l_ear','rf_leg','lf_leg','rb_leg','lb_leg','tail_base','tail_end']
 		else:
 			self.joints_list = joints_name
 		
@@ -104,6 +104,9 @@ class DataGenerator():
 			name = line[0]
 			box = list(map(int,line[1:5]))
 			joints = list(map(int,line[5:])) # convert each joint location to int
+			# Fetch only 4 joints of 9 (Only Train on 4 Joints, 2019.04.19)
+			joints = joints[:6]+joints[14:16]
+
 			if joints == [-1] * len(joints):
 				self.no_intel.append(name)
 			else:
@@ -119,11 +122,16 @@ class DataGenerator():
 				self.data_dict[name] = {'box' : box, 'joints' : joints, 'weights' : w}
 				self.train_table.append(name)
 		input_file.close()
+
+		self._create_sets()
+		'''
+		# Use it if you don't need validation set
 		self.train_set = self.train_table
 		print('-- Dataset Created')
 		np.save('Dataset-Training-Set', self.train_set)
 		print('-- Training set: ', len(self.train_set), ' samples.')
-	
+		'''
+
 	def _randomize(self):
 		""" 
 		Randomize the trainset_table
@@ -140,17 +148,14 @@ class DataGenerator():
 				return False
 		return True
 	
-	def _create_sets(self, validation_rate = 0.0):
+	def _create_sets(self, validation_rate = 0.1):
 		""" Select Elements to feed `training and validation set`
 			Args:
 			validation_rate	: Percentage of validation data in (0,1)
 			Notice validation_set only consists of samples with all the joints
 		# if the sample is not completed then make it as a training sample
-		# TODO: the fact is we don't have a sample which has all the joints labeled
-		# So I remove the validation step for now.
 		"""
-		pass
-		'''
+
 		sample = len(self.train_table)
 		valid_sample = int(sample * validation_rate)
 		self.train_set = self.train_table[:sample - valid_sample]
@@ -167,7 +172,6 @@ class DataGenerator():
 		np.save('Dataset-Training-Set', self.train_set)
 		print('-- Training set :', len(self.train_set), ' samples.')
 		print('-- Validation set :', len(self.valid_set), ' samples.')
-		'''
 	
 	"""
 	# ------------- Ground Truth HeatMap for each joints Creator ------------ 

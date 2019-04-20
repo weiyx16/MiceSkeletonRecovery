@@ -10,9 +10,6 @@ Model and Training function
 ---
 """
 
-"""
-	TODO: Maybe I need to calculate loss over joints number
-"""
 import time
 import tensorflow as tf
 import numpy as np
@@ -27,16 +24,16 @@ class HourglassModel():
 	Generate TensorFlow model to train and predict Mice Pose from images
 	Please check README.txt for further information on model management.
 	"""
-	def __init__(self, gpu_frac = 0.75, nFeat = 256, nStack = 4, nModules = 1, nLow = 4, outputDim = 9, batch_size = 4, 
+	def __init__(self, gpu_frac = 0.75, nFeat = 256, nStack = 4, nModules = 1, nLow = 4, outputDim = 4, batch_size = 4, 
 		drop_rate = 0.2, lear_rate = 2.5e-4, decay = 0.96, decay_step = 100, dataset = None, training = True, 
 		w_summary = True, logdir_train = None, logdir_test = None, tiny = True,
-		w_loss = False, name = 'mice_tiny_hourglass', model_save_dir = None, joints = ['nose','r_ear','l_ear','rf_leg','lf_leg','rb_leg','lb_leg','tail_base','tail_end']):
+		w_loss = False, name = 'mice_tiny_hourglass', model_save_dir = None, joints = ['nose','r_ear','l_ear','tail_base']):
 		""" Initializer
 		Args:
 			nStack				: number of stacks (stage/Hourglass modules)
 			nFeat				: number of feature channels on conv layers
 			nLow				: number of downsampling (pooling) per module
-			outputDim			: number of output Dimension (16 for MPII)
+			outputDim			: number of output Dimension (9 for full mice data)
 			batch_size			: size of training/testing Batch
 			dro_rate			: Rate of neurons disabling for Dropout Layers
 			lear_rate			: Learning Rate starting value
@@ -48,6 +45,7 @@ class HourglassModel():
 			w_loss				: (bool) used to weighted loss (didn't calculate loss on unvisible joints)
 			tiny				: (bool) Activate Tiny Hourglass
 			name				: name of the model
+			Joints				: Full one (9 points) ['nose','r_ear','l_ear','rf_leg','lf_leg','rb_leg','lb_leg','tail_base','tail_end']
 		"""
 		self.nStack = nStack
 		self.nFeat = nFeat
@@ -221,9 +219,10 @@ class HourglassModel():
 			self.test_summary = tf.summary.FileWriter(self.logdir_test)
 			#self.weight_summary = tf.summary.FileWriter(self.logdir_train, tf.get_default_graph()) # don't write down the summary of weighs for now
 		
-		# use merge_all to (use only sess.run for one time and apply ops on all in the train collection)
+		# use merge_all to (use to merge all ops/scalar/histogram to save in the train collection)
+		# E.g. use: self.summary.FileWriter(log_dir).add_summary(self.train_op, epoch*epochSize + i)
 		self.train_op = tf.summary.merge_all('train')
-		self.test_op = tf.summary.merge_all('test') # test_summary if for validation
+		self.test_op = tf.summary.merge_all('test') # summary merge if for validation
 		self.weight_op = tf.summary.merge_all('weight') # used for conv function
 		endTime = time.time()
 		print('>>>>> Model created in (' + str(int(abs(endTime-startTime))) + ' sec.)')
@@ -274,14 +273,14 @@ class HourglassModel():
 					img_train, gt_train, weight_train = next(self.generator)
 					if i % saveStep == saveStep - 1:
 						if self.w_loss:
-							_, cur_loss, summary = self.Session.run([self.train_rmsprop, self.loss, self.train_op], 
+							_, cur_loss, train_summary = self.Session.run([self.train_rmsprop, self.loss, self.train_op], 
 								feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.weights: weight_train})
 						else:
-							_, cur_loss, summary = self.Session.run([self.train_rmsprop, self.loss, self.train_op], 
+							_, cur_loss, train_summary = self.Session.run([self.train_rmsprop, self.loss, self.train_op], 
 								feed_dict = {self.img : img_train, self.gtMaps: gt_train})
 						# Save summary (Loss + Accuracy)
 						# FileWriter to logdir_train
-						self.train_summary.add_summary(summary, epoch*epochSize + i)
+						self.train_summary.add_summary(train_summary, epoch*epochSize + i)
 						self.train_summary.flush()
 					else:
 						if self.w_loss:
@@ -315,7 +314,6 @@ class HourglassModel():
 				self.resume['loss'].append(cost)
 				
 				# Validation Part
-				'''
 				accuracy_array = np.array([0.0]*len(self.joint_accur))
 				for i in range(validIter):
 					img_valid, gt_valid, _ = next(self.generator)
@@ -327,7 +325,6 @@ class HourglassModel():
 				valid_summary = self.Session.run(self.test_op, feed_dict={self.img : img_valid, self.gtMaps: gt_valid})
 				self.test_summary.add_summary(valid_summary, epoch)
 				self.test_summary.flush()
-				'''
 
 			print('>>>>> Training Done')
 			print('-- Resume:' + '\n' + '  Epochs: ' + str(nEpochs) + '\n' + '  n. Images: ' + str(nEpochs * epochSize * self.batchSize) )
@@ -336,7 +333,7 @@ class HourglassModel():
 			print('-- Training Time: ' + str(datetime.timedelta(seconds=time.time() - startTime)))
 			
 	def training_init(self, nEpochs = 100, epochSize = 100, saveStep = 20, valid_iter = 10, pre_trained = None):
-		""" Initialize the training process
+		""" Initialize the training process (And into _train():the true training function)
 
 		Args:
 			nEpochs			: Number of Epochs to train
@@ -423,7 +420,7 @@ class HourglassModel():
 	"""	
 
 	def _graph_hourglass(self, inputs):
-		""" Create the `Network Graph`
+		""" Create the `Network Graph(Stacked Hourglass)`
 
 			Args:
 				inputs : TF Tensor (placeholder) of shape (None, 3, 256, 256) (The size of self.img)
@@ -486,6 +483,7 @@ class HourglassModel():
 						out[i] = tf.transpose(out[i], [0,2,3,1])
 				return tf.stack(out, axis = 1 , name = 'final_output') # out size =  batchsize * nstack * 64 * 64 * 9
 				# stack: cascade the matrix from batchsize * 64 * 64 * 9 -> batchsize * nstack * 64 * 64 * 9 (put stacknumber in axis=1)
+				# So it can add in intermediate superview on output of each stack
 
 			else:
 				# Full 4-Rank Houglass network 
@@ -610,7 +608,7 @@ class HourglassModel():
 				return conv				
 	
 	def _residual(self, inputs, numOut, name = 'residual_block'):
-		""" `Residual Unit`
+		""" `Residual Unit` (combination of both the skip_layer and conv_block
 		
 		Args:
 			inputs	: Input Tensor

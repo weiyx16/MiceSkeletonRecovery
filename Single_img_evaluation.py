@@ -21,28 +21,52 @@ import cv2
 
 RED = (0, 0, 255)
 
-def show_prections(img, predictions):
+def show_prections(img, predictions,name):
     for index, coord in enumerate(predictions):
         keypt = (int(coord[1]), int(coord[0]))
         text_loc = (keypt[0]+7, keypt[1]+7)
         cv2.circle(img, keypt, 3, RED, -1)
         cv2.putText(img, str(index), text_loc, cv2.FONT_HERSHEY_DUPLEX, 0.5, RED, 1, cv2.LINE_AA)
     
-    cv2.imwrite(os.path.join(params['text_img_directory'], 'test_result.png'), img)
+    cv2.imwrite(os.path.join(params['text_img_directory'], name), img)
 
 if __name__ == '__main__':
     print('-- Parsing Config File')
-    params = process_config('config.cfg')
-    
-    img = cv2.imread(os.path.join(params['text_img_directory'], 'test.png'))
+    params = process_config('./config.cfg')
+    model = Inference(model = params['pretrained_model'])
 
-    img_crop = np.copy(img)[480:988, 900:1408]
+    img = cv2.imread(os.path.join(params['text_img_directory'], 'cam_00_0.2_30_001.png'))
+    bbox = [540,1000,850,1310]
+    img_crop = np.copy(img)[bbox[0]:bbox[1], bbox[2]:bbox[3]] # Assume: given bounding box
     test_img = cv2.resize(img_crop, (256, 256))
     #test_img = cv2.cvtColor(test_img, cv2.COLOR_BGR2RGB)
-
-    model = Inference()
-
     predictions = model.predictJoints(test_img, mode='gpu')
-    print(predictions)
+    print(np.add(np.asarray(predictions)*(bbox[1]-bbox[0])/256, np.array([bbox[0], bbox[2]])))
+    show_prections(test_img, predictions,'cam_00_0.2_30_001_r.png')
 
-    show_prections(test_img, predictions)
+    img = cv2.imread(os.path.join(params['text_img_directory'], 'cam_01_0.2_30_001.png'))
+    bbox = [820,1280, 1070,1530]
+    img_crop = np.copy(img)[bbox[0]:bbox[1], bbox[2]:bbox[3]] # Assume: given bounding box
+    test_img = cv2.resize(img_crop, (256, 256))
+    #test_img = cv2.cvtColor(test_img, cv2.COLOR_BGR2RGB)
+    predictions = model.predictJoints(test_img, mode='gpu')
+    print(np.add(np.asarray(predictions)*(bbox[1]-bbox[0])/256, np.array([bbox[0], bbox[2]])))
+    show_prections(test_img, predictions,'cam_01_0.2_30_001_r.png')
+
+    img = cv2.imread(os.path.join(params['text_img_directory'], 'cam_02_0.2_30_001.png'))
+    bbox = [860,1400, 0,540]
+    img_crop = np.copy(img)[bbox[0]:bbox[1], bbox[2]:bbox[3]] # Assume: given bounding box
+    test_img = cv2.resize(img_crop, (256, 256))
+    #test_img = cv2.cvtColor(test_img, cv2.COLOR_BGR2RGB)
+    predictions = model.predictJoints(test_img, mode='gpu')
+    print(np.add(np.asarray(predictions)*(bbox[1]-bbox[0])/256, np.array([bbox[0], bbox[2]])))
+    show_prections(test_img, predictions,'cam_02_0.2_30_001_r.png')
+
+    img = cv2.imread(os.path.join(params['text_img_directory'], 'cam_03_0.2_30_001.png'))
+    bbox = [1200,1800, 750,1350]
+    img_crop = np.copy(img)[bbox[0]:bbox[1], bbox[2]:bbox[3]] # Assume: given bounding box
+    test_img = cv2.resize(img_crop, (256, 256))
+    #test_img = cv2.cvtColor(test_img, cv2.COLOR_BGR2RGB)
+    predictions = model.predictJoints(test_img, mode='gpu')
+    print(np.add(np.asarray(predictions)*(bbox[1]-bbox[0])/256, np.array([bbox[0], bbox[2]])))
+    show_prections(test_img, predictions,'cam_03_0.2_30_001_r.png')
