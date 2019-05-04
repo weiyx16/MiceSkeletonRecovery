@@ -16,6 +16,7 @@ import numpy as np
 import sys
 import datetime
 import os
+import cv2
 from tqdm import tqdm
 
 class HourglassModel():
@@ -136,29 +137,39 @@ class HourglassModel():
 		# create the model on GPU with inputs/Model Graph/loss
 		with tf.device(self.gpu):
 			with tf.name_scope('inputs'):
-				# Shape Input Image - batchSize: None, height: 256, width: 256, channel: 3 (RGB) in NHWC format
+				# Shape Input Image - batchSize: None, camera_view: 4, height: 256, width: 256, channel: 3 (RGB) in NHWC format
 				# NOTICE Set 256 unchanged
-				self.img = tf.placeholder(dtype= tf.float32, shape= (None, 256, 256, 3), name = 'input_img')
+				self.img = tf.placeholder(dtype= tf.float32, shape= (None, 4, 256, 256, 3), name = 'input_img')
 				if self.w_loss:
-					self.weights = tf.placeholder(dtype = tf.float32, shape = (None, self.outDim))
-				# Shape Ground Truth Map: batchSize x nStack x 64 x 64 x outDim
+					self.weights = tf.placeholder(dtype = tf.float32, shape = (None, 4, self.outDim))
+				# Shape Ground Truth Map: batchSize x camera_view x nStack x 64 x 64 x outDim
 				# Intermediate supervision: so need multiple by nStack = 4				
-				self.gtMaps = tf.placeholder(dtype = tf.float32, shape = (None, self.nStack, 64, 64, self.outDim))
+				self.gtMaps = tf.placeholder(dtype = tf.float32, shape = (None, 4, self.nStack, 64, 64, self.outDim), name = 'groundtruth')
+				self.bbox = tf.placeholder(dtype = tf.float32, shape = (None, 4, 4), name = 'input_crop_boundingbox')
 			inputTime = time.time()
 			print('-- Model Inputs : Done (' + str(int(abs(inputTime-startTime))) + ' sec.)')
 
 			# Shape HG output: batchSize x nStack x 64 x 64 x outDim
+			# But shape the whole model output is: batchSize x camera_view x nStack x 64 x 64 x outDim (self.output)
 			# Generate the graph of the whole hourglass model here.
-			self.output = self._graph_hourglass(self.img)
+			self.output_list = []
+			for i in range(4):
+				self.output_list.append(self._graph_hourglass(self.img[:,i,:,:,:]))
+				print('-- -- Model Graph for No. %d' %(i), ' View')
+			self.output = tf.stack(self.output_list, axis=1)
+
 			graphTime = time.time()
 			print('-- Model Graph : Done (' + str(int(abs(graphTime-inputTime))) + ' sec.)')
 
 			with tf.name_scope('loss'):
 				# use sigmoid_cross_Ent to measure the loss
 				if self.w_loss:
-					self.loss = tf.reduce_mean(self.weighted_bce_loss(), name='reduced_loss')
+					self.gt_loss = tf.reduce_mean(self.weighted_bce_loss(), name='reduced_ground_truth_loss')
 				else:
-					self.loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.output, labels= self.gtMaps), name= 'cross_entropy_loss')
+					self.gt_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.output, labels= self.gtMaps), name= 'cross_entropy_loss')
+				# Introduce reprojection loss 
+				self.geometry_loss = tf.reduce_mean(self.camera_reproject_loss(), name='reduced_camera_reproject_loss')
+				self.loss = tf.add(self.gt_loss, self.geometry_loss)
 			lossTime = time.time()	
 			print('-- Model Loss : Done (' + str(int(abs(lossTime-graphTime))) + ' sec.)')
 
@@ -205,6 +216,8 @@ class HourglassModel():
 		with tf.device(self.cpu):
 			with tf.name_scope('training'):
 				# use summary ops to show in the tensorboard
+				tf.summary.scalar('gt_loss', self.gt_loss, collections = ['train'])
+				tf.summary.scalar('geometry_loss', self.geometry_loss, collections = ['train'])
 				tf.summary.scalar('loss', self.loss, collections = ['train'])
 				tf.summary.scalar('learning_rate', self.lr, collections = ['train'])
 			with tf.name_scope('summary'):
@@ -220,18 +233,14 @@ class HourglassModel():
 			#self.weight_summary = tf.summary.FileWriter(self.logdir_train, tf.get_default_graph()) # don't write down the summary of weighs for now
 		
 		# use merge_all to (use to merge all ops/scalar/histogram to save in the train collection)
-		# E.g. use: self.summary.FileWriter(log_dir).add_summary(self.train_op, epoch*epochSize + i)
+		# E.g. use: tf.summary.FileWriter(log_dir).add_summary(self.train_op or self.weight_op, epoch*epochSize + i)
 		self.train_op = tf.summary.merge_all('train')
-		self.test_op = tf.summary.merge_all('test') # summary merge if for validation
+		# self.test_op = tf.summary.merge_all('test') # summary merge if for validation
 		self.weight_op = tf.summary.merge_all('weight') # used for conv function
 		endTime = time.time()
 		print('>>>>> Model created in (' + str(int(abs(endTime-startTime))) + ' sec.)')
 		# every time is an object and if we don't need them then remove them
-		del endTime, startTime, initTime, optimTime, minimTime, lrTime, accurTime, lossTime, graphTime, inputTime
-		
-	"""
-	# --------------- Model Training --------------
-	"""
+		del endTime, startTime, initTime, optimTime, minimTime, lrTime, accurTime, lossTime, graphTime, inputTime		
 	
 	def weighted_bce_loss(self):
 		""" Create Weighted Loss Function
@@ -239,6 +248,7 @@ class HourglassModel():
 		"""
 
 		'''
+		# We can use: self.weights + tf.expand_dims to remove empty heatmap
 		self.bceloss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.output, labels= self.gtMaps), name= 'cross_entropy_loss')
 		e1 = tf.expand_dims(self.weights, axis = 1, name = 'expdim01')
 		e2 = tf.expand_dims(e1, axis = 1, name = 'expdim02')
@@ -246,9 +256,193 @@ class HourglassModel():
 		return tf.multiply(e3, self.bceloss, name = 'lossW')
 		'''
 		loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=self.output, labels= self.gtMaps)
-		weights = tf.reduce_sum(self.gtMaps, axis=[2, 3], keepdims=True)
-		return weights * loss
+		weights = tf.reduce_sum(self.gtMaps, axis=[3, 4], keepdims=True)
+		return tf.reduce_sum(weights * loss, axis=[1, 2, 5], keepdims=True) # shape is batchsize*1*1*64*64*1 (sum over view+stack+joints)
 
+	def camera_reproject_loss(self):
+		"""
+			Create camera geometry placement loss for we use multi-camera(4 cameras)
+			Introduce epipolar constraint on the output heatmap between difference views
+			ref: Monet: multiview semi-supervised keypoint via epipolar divergence
+			Sum up for all the view-pair&stack&joints number
+		"""
+		
+		# Don't forget to use weights = tf.reduce_sum(self.gtMaps, axis=[2, 3], keepdims=True)
+		# batchSize x camera_view x nStack x 64 x 64 x outDim
+		output_shape = self.output.get_shape().as_list()
+		self.project_loss = []
+		for batch_index in range(self.batchSize):
+			# Batch_size
+			# First step: warp the heatmaps by the Hh matrix	
+			# Second step: calculate (a,b) and the loss for this frame
+			cur_project_loss = tf.zeros([1,])
+			for camera_view_i in range(output_shape[1]):
+				# Camera_view
+				for camera_view_j in range(output_shape[1]):
+					if camera_view_i == camera_view_j:
+						pass
+					else:
+						# warp matrix Hh
+						# Hh is defined on two-paired heatmaps (and its coordinate)
+						# but the Hr is defined on two-paired source size image (and its coordinate)
+						Hr_i = self.dataset.Rectification_Homography_Matrix[camera_view_i][camera_view_j]
+						Hh_i_matrix = self._warp_matrix(self.bbox[batch_index,camera_view_i,:], Hr_i)
+						Hr_j = self.dataset.Rectification_Homography_Matrix[camera_view_j][camera_view_i]
+						Hh_j_matrix = self._warp_matrix(self.bbox[batch_index,camera_view_j,:], Hr_j)
+
+						#for stack_index in range(output_shape[2]):
+						# Only calculate on the final stack for now
+						for joint_index in range(output_shape[5]):
+							# Each_joints
+							# warp images 
+							heatmap_src_i = self.output[batch_index,camera_view_i, output_shape[2]-1, :,:,joint_index]
+							heatmap_warp_i = self._warp_img(heatmap_src_i, Hh_i_matrix)
+							heatmap_src_j = self.output[batch_index,camera_view_j, output_shape[2]-1, :,:,joint_index]
+							heatmap_warp_j = self._warp_img(heatmap_src_j, Hh_j_matrix)							
+							# TODO: 2019.5.4 check the warp function and its result
+
+							# a, b: for every v in warped image i: av+b is coorsponding row in warped image j
+							f_yi = self.dataset.Intrinsic[camera_view_i][1,1]
+							f_yj = self.dataset.Intrinsic[camera_view_j][1,1]
+							p_yi = self.dataset.Intrinsic[camera_view_i][1,2]
+							p_yj = self.dataset.Intrinsic[camera_view_j][1,2]
+							a = tf.cast(tf.div(f_yj, f_yi), 'float32')
+							b = tf.cast(tf.add(-p_yj, tf.multiply(tf.div(-f_yj, f_yi), p_yi)), 'float32')
+							# Qi, Qj_i
+							v = tf.linspace(0.0, 63.0, 64)
+							a = tf.add(tf.zeros_like(v), a)
+							v_j = tf.add(a*v, b)
+							v_j = tf.cast(tf.floor(tf.clip_by_value(v_j, 0.0, 63.0)), 'int32')
+							v_j = tf.reshape(v_j, (v_j.shape[0], 1))
+							Q_hat_i = tf.reduce_max(heatmap_warp_i, axis = 1)
+							Q_hat_j = tf.reduce_max(tf.gather_nd(heatmap_warp_j, v_j), axis = 1)
+							# Calculate loss
+							cur_project_loss += tf.reduce_sum(Q_hat_i*tf.log(tf.div(Q_hat_i, Q_hat_j)))
+			self.project_loss.append(cur_project_loss)
+			print('-- -- Geometry Loss for No. %d' %(batch_index), ' batch')
+		self.project_loss = tf.stack(self.project_loss, axis=0)
+		return self.project_loss#tf.reduce_sum(self.project_loss, axis=[1, 2, 3], keepdims=True)		
+	
+	def _warp_matrix(self, bbox, Hr):
+		"""
+			Calculate the true warping matrix including the crop and resize of the input img to the output heatmap
+			Because the Hr matrix is defined on the source img
+			ref: Monet: multiview semi-supervised keypoint via epipolar divergence
+		"""
+		s_h = 64 / 256 # output heatmap / input network cropped image
+		Hc = np.asarray([[s_h, 0, 0],
+						[0, s_h, 0],
+						[0, 0, 1]], dtype=np.float)
+		Hc_inv = tf.cast(tf.matrix_inverse(tf.convert_to_tensor(Hc)), 'float32')
+		s = 256 / tf.maximum(bbox[2], bbox[3]) #tf.cast(256 / tf.maximum(bbox[2], bbox[3]), 'float32') # input network cropped image size / source cropped image size
+		Hb = tf.convert_to_tensor([[s, 0, -s*bbox[0]],
+									[0, s, -s*bbox[1]],
+									[0, 0, 1]])
+		Hb_inv = tf.cast(tf.matrix_inverse(Hb), 'float32')
+		Hb_hat = tf.convert_to_tensor([[s, 0, -s*bbox[0]],
+										[0, s, -s*bbox[1]],
+										[0, 0, 1]])
+		Hc_hat = np.asarray([[s_h, 0, 0],
+							[0, s_h, 0],
+							[0, 0, 1]], dtype=np.float32)
+		Hc_hat = tf.convert_to_tensor(Hc_hat)
+		return tf.matmul(tf.matmul(tf.matmul(Hc_hat, Hb_hat),tf.cast(tf.convert_to_tensor(Hr), 'float32')), tf.matmul(Hb_inv, Hc_inv))
+
+	def _warp_img(self, heatmap_src, Hh):
+		"""
+			Inverse warping by Matrix Hh through bilinear interpolation
+			heatmap_warp(x) = heatmap_src(Hh^-1 * x)
+			ref: Spatial Transformer Networks NIPS 2015 (include warping as part of the network with parameter to be learned)
+			# we don't need to learn the warp parameters here
+		"""
+		# the input and output can have different size
+		out_height = tf.shape(heatmap_src)[0]
+		out_width = tf.shape(heatmap_src)[1]
+		Hh_inv = tf.cast(tf.matrix_inverse(Hh), 'float32')
+		# grid of (x_t, y_t, 1) (target) in ref
+		grid = self._meshgrid(out_height, out_width)
+		# Transform A x (x_t, y_t, 1)^T -> (x_s, y_s)
+		T_g = tf.matmul(Hh_inv, grid)
+		T_g = T_g / T_g[2]
+		x_s_flat = T_g[0,:]
+		y_s_flat = T_g[1,:]
+		heatmap_warp_flat = self._interpolate(heatmap_src, x_s_flat, y_s_flat)
+		return tf.reshape(heatmap_warp_flat, tf.stack([out_height, out_width]))
+
+	def _meshgrid(self, height, width):
+		with tf.variable_scope('_meshgrid'):
+			# This should be equivalent to:
+			#  x_t, y_t = np.meshgrid(np.linspace(-1, 1, width),
+			#                         np.linspace(-1, 1, height))
+			#  ones = np.ones(np.prod(x_t.shape))
+			#  grid = np.vstack([x_t.flatten(), y_t.flatten(), ones])
+			
+			x_t = tf.matmul(tf.ones(shape=tf.stack([height, 1])),
+			                tf.transpose(tf.expand_dims(tf.linspace(-1.0, 1.0, width), 1), [1, 0]))
+			y_t = tf.matmul(tf.expand_dims(tf.linspace(-1.0, 1.0, height), 1),
+			                tf.ones(shape=tf.stack([1, width])))
+			x_t_flat = tf.reshape(x_t, (1, -1))
+			y_t_flat = tf.reshape(y_t, (1, -1))
+			ones = tf.ones_like(x_t_flat)		
+			grid = tf.concat([x_t_flat, y_t_flat, ones], 0)
+			return grid
+
+	def _interpolate(self, heatmap_src, x, y):
+		'''
+			# Bilinear interpolation by grid methods
+		'''
+		with tf.variable_scope('_interpolate'):
+			# constants
+			height_f = tf.cast(tf.shape(heatmap_src)[0], 'float32')
+			width_f = tf.cast(tf.shape(heatmap_src)[1], 'float32')
+			width = tf.cast(width_f, 'int32')
+			height = tf.cast(height_f, 'int32')
+			x = tf.cast(x, 'float32')
+			y = tf.cast(y, 'float32')
+			
+			# scale indices from [-1, 1] to [0, width/height]
+			x = (x + 1.0) * (width_f) / 2.0
+			y = (y + 1.0) * (height_f) / 2.0
+			
+			# bilinear sampling
+			x0 = tf.cast(tf.floor(x), 'int32')
+			x1 = x0 + 1
+			y0 = tf.cast(tf.floor(y), 'int32')
+			y1 = y0 + 1
+			
+			x0 = tf.clip_by_value(x0, 0, width - 1)
+			x1 = tf.clip_by_value(x1, 0, width - 1)
+			y0 = tf.clip_by_value(y0, 0, height - 1)
+			y1 = tf.clip_by_value(y1, 0, height - 1)
+
+			# Use 1-D index instead of 2-D index, so take the width into consideration
+			base_y0 = y0 * width
+			base_y1 = y1 * width
+			idx_a = base_y0 + x0
+			idx_b = base_y1 + x0
+			idx_c = base_y0 + x1
+			idx_d = base_y1 + x1
+			# use indices to lookup pixels in the flat image and restore
+			im_flat = tf.cast(tf.reshape(heatmap_src, [-1]), 'float32')
+			Ia = tf.expand_dims(tf.gather(im_flat, idx_a), 1)
+			Ib = tf.expand_dims(tf.gather(im_flat, idx_b), 1)
+			Ic = tf.expand_dims(tf.gather(im_flat, idx_c), 1)
+			Id = tf.expand_dims(tf.gather(im_flat, idx_d), 1)
+			# calculate interpolated values with weights
+			x0_f = tf.cast(x0, 'float32')
+			x1_f = tf.cast(x1, 'float32')
+			y0_f = tf.cast(y0, 'float32')
+			y1_f = tf.cast(y1, 'float32')
+			wa = tf.expand_dims(((x1_f - x) * (y1_f - y)), 1)
+			wb = tf.expand_dims(((x1_f - x) * (y - y0_f)), 1)
+			wc = tf.expand_dims(((x - x0_f) * (y1_f - y)), 1)
+			wd = tf.expand_dims(((x - x0_f) * (y - y0_f)), 1)
+			output = tf.add_n([wa * Ia, wb * Ib, wc * Ic, wd * Id])
+			return output
+
+	"""
+	# --------------- Model Training --------------
+	"""
 	def _train(self, nEpochs = 100, epochSize = 100, saveStep = 20, validIter = 10):
 		"""
 			`Real training process`
@@ -270,34 +464,36 @@ class HourglassModel():
 
 				# Training Part
 				for i in range(epochSize):
-					img_train, gt_train, weight_train = next(self.generator)
+					img_train, gt_train, weight_train, bbox_train = next(self.generator)
+					# the saveStep is the step to save summary not the model
 					if i % saveStep == saveStep - 1:
 						if self.w_loss:
-							_, cur_loss, train_summary = self.Session.run([self.train_rmsprop, self.loss, self.train_op], 
-								feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.weights: weight_train})
+							_, cur_loss, cur_geometry_loss, train_summary = self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss, self.train_op], 
+								feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.weights: weight_train, self.bbox: bbox_train})
 						else:
-							_, cur_loss, train_summary = self.Session.run([self.train_rmsprop, self.loss, self.train_op], 
-								feed_dict = {self.img : img_train, self.gtMaps: gt_train})
+							_, cur_loss, cur_geometry_loss, train_summary = self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss, self.train_op], 
+								feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.bbox: bbox_train })
 						# Save summary (Loss + Accuracy)
 						# FileWriter to logdir_train
 						self.train_summary.add_summary(train_summary, epoch*epochSize + i)
 						self.train_summary.flush()
 					else:
 						if self.w_loss:
-							_, cur_loss, = self.Session.run([self.train_rmsprop, self.loss], 
-								feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.weights: weight_train})
+							_, cur_loss, cur_geometry_loss = self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss], 
+								feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.weights: weight_train, self.bbox: bbox_train})
 						else:
-							_, cur_loss, = self.Session.run([self.train_rmsprop, self.loss], 
-								feed_dict = {self.img : img_train, self.gtMaps: gt_train})
+							_, cur_loss, cur_geometry_loss = self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss], 
+								feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.bbox: bbox_train})
 					cost += cur_loss
 					avg_cost += cur_loss/epochSize
+					print(' [*] In Epoch {}, Loop {}, geometry loss is {}, total loss is {}'.format(epoch, i, cur_geometry_loss, cur_loss))
 				epochfinishTime = time.time()
 				
 				# Save Weight (axis = epoch) for all the conv
 				if self.w_loss:
-					weight_summary = self.Session.run(self.weight_op, {self.img : img_train, self.gtMaps: gt_train, self.weights: weight_train})
+					weight_summary = self.Session.run(self.weight_op, {self.img : img_train, self.gtMaps: gt_train, self.weights: weight_train, self.bbox: bbox_train})
 				else :
-					weight_summary = self.Session.run(self.weight_op, {self.img : img_train, self.gtMaps: gt_train})
+					weight_summary = self.Session.run(self.weight_op, {self.img : img_train, self.gtMaps: gt_train, self.bbox: bbox_train})
 				self.train_summary.add_summary(weight_summary, epoch)
 				self.train_summary.flush()
 
@@ -313,6 +509,7 @@ class HourglassModel():
 
 				self.resume['loss'].append(cost)
 				
+				'''
 				# Validation Part
 				accuracy_array = np.array([0.0]*len(self.joint_accur))
 				for i in range(validIter):
@@ -325,7 +522,7 @@ class HourglassModel():
 				valid_summary = self.Session.run(self.test_op, feed_dict={self.img : img_valid, self.gtMaps: gt_valid})
 				self.test_summary.add_summary(valid_summary, epoch)
 				self.test_summary.flush()
-
+				'''
 			print('>>>>> Training Done')
 			print('-- Resume:' + '\n' + '  Epochs: ' + str(nEpochs) + '\n' + '  n. Images: ' + str(nEpochs * epochSize * self.batchSize) )
 			print('-- Final Loss: ' + str(cost) + '\n' + ' Loss Discimination: ' + str(100*self.resume['loss'][-1]/(self.resume['loss'][0] + 0.1)) + '%' )
@@ -364,7 +561,7 @@ class HourglassModel():
 				self._train(nEpochs, epochSize, saveStep, validIter=valid_iter)
 		
 	def _define_saver_summary(self, summary = True):
-		""" Create Summary and Saver
+		""" Check Summary and Saver directory exists or not
 		Args:
 			logdir_train	: Path to train summary directory
 			logdir_test		: Path to test summary directory
@@ -372,7 +569,6 @@ class HourglassModel():
 		if (self.logdir_train == None) or (self.logdir_test == None):
 			raise ValueError('Train/Test directory not assigned')
 			
-	
 	def _init_weight(self):
 		""" Initialize weights and session
 		"""
@@ -425,9 +621,9 @@ class HourglassModel():
 			Args:
 				inputs : TF Tensor (placeholder) of shape (None, 3, 256, 256) (The size of self.img)
 		"""
-		with tf.name_scope('model'):
+		with tf.variable_scope('model'):
 			# preprocess the image
-			with tf.name_scope('preprocessing'):
+			with tf.variable_scope('preprocessing'):
 				# Input Dim : batchsize x 256 x 256 x 3
 				inputs = tf.transpose(inputs, [0,3,1,2]) # suitable to NCHW format
 				pad1 = tf.pad(inputs, [[0,0],[0,0],[2,2],[2,2]], name='pad_1')
@@ -461,9 +657,9 @@ class HourglassModel():
 			out_ = [None] * self.nStack
 			sum_ = [None] * self.nStack
 			if self.tiny:
-				with tf.name_scope('stacks'):
+				with tf.variable_scope('stacks'):
 					for i in range(0, self.nStack):
-						with tf.name_scope('stage_' + str(i)):
+						with tf.variable_scope('stage_' + str(i)):
 							if i == 0:
 								hg[i] = self._hourglass(r3, self.nLow, self.nFeat, 'hourglass')
 							else:
@@ -487,9 +683,9 @@ class HourglassModel():
 
 			else:
 				# Full 4-Rank Houglass network 
-				with tf.name_scope('stacks'):
+				with tf.variable_scope('stacks'):
 					for i in range(0, self.nStack):
-						with tf.name_scope('stage_' + str(i)):
+						with tf.variable_scope('stage_' + str(i)):
 							if i == 0:
 								hg[i] = self._hourglass(r3, self.nLow, self.nFeat, 'hourglass')
 							else:
@@ -518,17 +714,23 @@ class HourglassModel():
 		""" Spatial Convolution (2D) `Singel conv2d`
 		Args:
 			inputs			: Input Tensor (Data Type : NCHW)
-			filters			: Number of filters (channels)
+			filters			: Number of filters (output channels)
 			kernel_size		: Size of kernel
 			strides			: Stride
 			name			: Name of the block
 		Returns:
 			conv			: Output Tensor (Convolved Input)
 		"""
-		with tf.name_scope(name):
+		with tf.variable_scope(name) as scope:
 			# Kernel for convolution, Xavier Initialisation
 			# initialize the kernel weight using xavier method
-			kernel = tf.Variable(tf.contrib.layers.xavier_initializer(uniform=False)([kernel_size, kernel_size, inputs.get_shape().as_list()[1], filters]), name= 'weights')
+			try:
+				kernel = tf.get_variable(name+'_weights', initializer = tf.contrib.layers.xavier_initializer(uniform=False)([kernel_size, kernel_size, inputs.get_shape().as_list()[1], filters]))
+			except ValueError:
+				# print('reuse variables here')
+				scope.reuse_variables()
+				kernel = tf.get_variable(name+'_weights')
+			
 			conv = tf.nn.conv2d(inputs, kernel, [1,1,strides,strides], padding='VALID', data_format='NCHW')
 			if self.w_summary:
 				with tf.device('/cpu:0'):
@@ -547,11 +749,17 @@ class HourglassModel():
 		Returns:
 			norm			: Output Tensor
 		"""
-		with tf.name_scope(name):
+		with tf.variable_scope(name) as scope:
 			# initialize the kernel weight using xavier method
-			kernel = tf.Variable(tf.contrib.layers.xavier_initializer(uniform=False)([kernel_size,kernel_size, inputs.get_shape().as_list()[1], filters]), name= 'weights')
+			try:
+				kernel = tf.get_variable(name+'_weights', initializer = tf.contrib.layers.xavier_initializer(uniform=False)([kernel_size,kernel_size, inputs.get_shape().as_list()[1], filters]))
+			except ValueError:
+				# print('reuse variables here')
+				scope.reuse_variables()
+				kernel = tf.get_variable(name+'_weights')
+			
 			conv = tf.nn.conv2d(inputs, kernel, [1,1,strides,strides], padding='VALID', data_format='NCHW')
-			norm = tf.contrib.layers.batch_norm(conv, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training)
+			norm = tf.contrib.layers.batch_norm(conv, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training, data_format='NCHW', reuse=tf.AUTO_REUSE, scope=scope)
 			if self.w_summary:
 				with tf.device('/cpu:0'):
 					# Adding a histogram summary makes it possible to visualize your data's distribution in TensorBoard
@@ -569,22 +777,22 @@ class HourglassModel():
 			conv_3/conv	: Output Tensor
 		"""
 		if self.tiny:
-			with tf.name_scope(name):
-				norm = tf.contrib.layers.batch_norm(inputs, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training)
+			with tf.variable_scope(name) as scope:
+				norm = tf.contrib.layers.batch_norm(inputs, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training, data_format='NCHW', reuse=tf.AUTO_REUSE, scope=scope)
 				pad = tf.pad(norm, np.array([[0,0],[0,0],[1,1],[1,1]]), name= 'pad')
 				conv = self._conv(pad, int(numOut), kernel_size=3, strides=1, name= 'conv')
 				return conv
 		else:
-			with tf.name_scope(name):
+			with tf.variable_scope(name):
 				# Standard convolution in the paper with kernel size [1 -> 3 -> 1]
-				with tf.name_scope('norm_1'):
+				with tf.variable_scope(name+'norm_1'):
 					norm_1 = tf.contrib.layers.batch_norm(inputs, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training)
 					conv_1 = self._conv(norm_1, int(numOut/2), kernel_size=1, strides=1, name= 'conv')
-				with tf.name_scope('norm_2'):
+				with tf.variable_scope(name+'norm_2'):
 					norm_2 = tf.contrib.layers.batch_norm(conv_1, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training)
 					pad = tf.pad(norm_2, np.array([[0,0],[0,0],[1,1],[1,1]]), name= 'pad')
 					conv_2 = self._conv(pad, int(numOut/2), kernel_size=3, strides=1, name= 'conv')
-				with tf.name_scope('norm_3'):
+				with tf.variable_scope(name+'norm_3'):
 					norm_3 = tf.contrib.layers.batch_norm(conv_2, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training)
 					conv_3 = self._conv(norm_3, int(numOut), kernel_size=1, strides=1, name= 'conv')
 				return conv_3
@@ -600,7 +808,7 @@ class HourglassModel():
 			Tensor of shape (None, inputs.height, inputs.width, numOut)
 		"""
 		# if the channel size is equal to desired one then use inputs if not then conv it first
-		with tf.name_scope(name):
+		with tf.variable_scope(name):
 			if inputs.get_shape().as_list()[1] == numOut:
 				return inputs
 			else:
@@ -616,7 +824,7 @@ class HourglassModel():
 			name	: Name of the block
 			`Add on the conv2d and skip layer`
 		"""
-		with tf.name_scope(name):
+		with tf.variable_scope(name):
 			convb = self._conv_block(inputs, numOut)
 			skipl = self._skip_layer(inputs, numOut)
 			# use add_n to sum a list of tensors(equal to +)
@@ -631,7 +839,7 @@ class HourglassModel():
 			numOut	: Number of Output Features (channels)
 			name	: Name of the block
 		"""
-		with tf.name_scope(name):
+		with tf.variable_scope(str(n)+name):
 			# Upper Branch
 			up_1 = self._residual(inputs, numOut, name = 'up_1')
 			# Lower Branch
@@ -659,11 +867,12 @@ class HourglassModel():
 	def _accuracy_computation(self):
 		""" Computes accuracy tensor
 			for each joint in each image of the batch(average in these images)
+			Notice use the output of the last_stack
 		"""
 		self.joint_accur = []
 		for i in range(len(self.joints)):
 			# What's saved in self.nstack-1 is the last output of the network
-			self.joint_accur.append(self._accur(self.output[:, self.nStack - 1, :, :,i], self.gtMaps[:, self.nStack - 1, :, :, i], self.batchSize))
+			self.joint_accur.append(self._accur(self.output[:, :, self.nStack - 1, :, :,i], self.gtMaps[:, :, self.nStack - 1, :, :, i], self.batchSize))
 	
 	def _accur(self, pred, gtMap, num_image):
 		""" Given a Prediction batch (pred) and a Ground Truth batch (gtMaps)
@@ -678,7 +887,8 @@ class HourglassModel():
 		"""
 		err = tf.to_float(0)
 		for i in range(num_image):
-			err = tf.add(err, self._compute_err(pred[i], gtMap[i]))
+			for view in range(4):
+				err = tf.add(err, self._compute_err(pred[i][view], gtMap[i][view]))
 			# err is the distance-> bigger err means lower accurancy-> we need to 1-err
 		return tf.subtract(tf.to_float(1), err/num_image)
 

@@ -66,12 +66,10 @@ if __name__ == '__main__':
 	
 	print('>>>>> Creating Dataset Now')
 	# dataset.train_set is the table of the training set's names
-	dataset = DataGenerator(joints_name = params['joint_list'],img_dir = params['img_directory'], train_data_file = params['training_txt_file'])
+	dataset = DataGenerator(joints_name = params['joint_list'],img_dir = params['img_directory'], train_data_file = params['training_txt_file'],
+							camera_extrinsic = params['camera_extrinsic'], camera_intrinsic = params['camera_intrinsic'])
 	dataset._create_train_table()
-	dataset._randomize()
-	# dataset._create_sets(validation_rate=0.1) # No validation for now
-	
-	
+
 	# nfeats:256, nstacks:4 nmodules:1(not used)
 	# nlow:4 (Number of downsampling in one stack)
 	# mcam:false (attention system(not needed))

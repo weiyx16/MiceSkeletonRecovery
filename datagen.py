@@ -19,6 +19,8 @@ import random
 import time
 # from skimage import transform
 import scipy.misc as scm
+import json
+import yaml
 
 class DataGenerator():
 	""" 
@@ -62,12 +64,14 @@ class DataGenerator():
 				Missing values with -1
 	"""
 
-	def __init__(self, joints_name = None, img_dir=None, train_data_file = None):
+	def __init__(self, joints_name = None, img_dir=None, train_data_file = None, camera_extrinsic = None, camera_intrinsic = None):
 		""" `Initializer`
 		Args:
 			joints_name			: List of joints condsidered
 			img_dir				: Directory containing every images
 			train_data_file		: Text file with training set data
+			camera_extrinsic    : file with multicamera extrinsic data
+			camera_intrinsic    : file with multicamera intrinsic data
 		"""
 		if joints_name == None:
 			self.joints_list = ['nose','r_ear','l_ear','tail_base'] #['nose','r_ear','l_ear','rf_leg','lf_leg','rb_leg','lb_leg','tail_base','tail_end']
@@ -78,6 +82,9 @@ class DataGenerator():
 		self.img_dir = img_dir
 		self.train_data_file = train_data_file
 		self.images = os.listdir(img_dir)
+		self.camera_extrinsic = camera_extrinsic
+		self.camera_intrinsic = camera_intrinsic
+
 	"""
 	# --------------------Generator Initialization Methods ---------------------
 	"""
@@ -97,40 +104,56 @@ class DataGenerator():
 		self.train_table = [] # just save the names of images trainable
 		self.no_intel = [] # save the images with no mice appears
 		self.data_dict = {}
+		self.img_pair = []
 		input_file = open(self.train_data_file, 'r')
+		dataset_to_list = []
 		print('-- Read training data and Convert it to a table')
 		for line in input_file:
 			line = line.strip().split(' ')
-			name = line[0]
-			box = list(map(int,line[1:5]))
-			joints = list(map(int,line[5:])) # convert each joint location to int
-			# Fetch only 4 joints of 9 (Only Train on 4 Joints, 2019.04.19)
-			joints = joints[:6]+joints[14:16]
-
-			if joints == [-1] * len(joints):
-				self.no_intel.append(name)
-			else:
-				# reshape the to 9 row 2 col 
-				joints = np.reshape(joints, (-1,2))
-				w = [1] * joints.shape[0]
-				# set weights = 0 if this joint is not visiable
-				for i in range(joints.shape[0]):
-					if np.array_equal(joints[i], [-1,-1]):
-						w[i] = 0
-				# if we have one joint in the image then save it
-				# in the form of dict with name+(box+joint+visibility)
-				self.data_dict[name] = {'box' : box, 'joints' : joints, 'weights' : w}
-				self.train_table.append(name)
+			dataset_to_list.append(line)
+		for line in dataset_to_list:
+			if line[0][0:6] == r'cam_00':
+				name_to_find = []
+				for i in range(4):
+					# 4: camera number
+					name_to_find.append(line[0][0:5] + str(i) + line[0][6:])
+				index_to_find = []
+				for index, line_to_find in enumerate(dataset_to_list):
+					for i in range(4):
+						if name_to_find[i] == line_to_find[0]:
+							index_to_find.append(index)
+				cur_img_pair = name_to_find
+				for i in range(4):
+					line_to_find = dataset_to_list[index_to_find[i]]
+					name = line_to_find[0]
+					box = list(map(int,line_to_find[1:5]))
+					joints = list(map(int,line_to_find[5:])) # convert each joint location to int
+					# Fetch only 4 joints of 9 (Only Train on 4 Joints, 2019.04.19)
+					joints = joints[:6]+joints[14:16]
+					# reshape to 4 row 2 col 
+					joints = np.reshape(joints, (-1,2))
+					w = [1] * joints.shape[0]
+					# set weights = 0 if this joint is not visiable
+					for wi in range(joints.shape[0]):
+						if np.array_equal(joints[wi], [-1,-1]):
+							w[wi] = 0
+					# in the form of dict with name+(box+joint+visibility)
+					self.data_dict[name] = {'box' : box, 'joints' : joints, 'weights' : w}
+					self.train_table.append(name)
+				self.img_pair.append(cur_img_pair) # Use the cam_00 as the index of the pair in the dict
 		input_file.close()
+		self._camera_rectification_homography_params()
 
-		self._create_sets()
-		'''
+		# self._randomize()
+		# self._create_sets()
+
 		# Use it if you don't need validation set
 		self.train_set = self.train_table
 		print('-- Dataset Created')
 		np.save('Dataset-Training-Set', self.train_set)
 		print('-- Training set: ', len(self.train_set), ' samples.')
-		'''
+		print('-- Training image pairs: ', len(self.img_pair))
+
 
 	def _randomize(self):
 		""" 
@@ -138,13 +161,13 @@ class DataGenerator():
 		"""
 		random.shuffle(self.train_table)
 	
-	def _complete_sample(self, name):
+	def _complete_sample(self, joints):
 		""" Check if a sample has all joints value, which means every joints are visible
 		Args:
-			name 	: Name of the sample
+			joints 	: the sample joints
 		"""
-		for i in range(self.data_dict[name]['joints'].shape[0]):
-			if np.array_equal(self.data_dict[name]['joints'][i],[-1,-1]):
+		for i in range(joints.shape[0]):
+			if np.array_equal(joints[i,:],[-1,-1]):
 				return False
 		return True
 	
@@ -155,7 +178,9 @@ class DataGenerator():
 			Notice validation_set only consists of samples with all the joints
 		# if the sample is not completed then make it as a training sample
 		"""
-
+		pass
+		'''
+		# The validation part have not been adapted to multiview version
 		sample = len(self.train_table)
 		valid_sample = int(sample * validation_rate)
 		self.train_set = self.train_table[:sample - valid_sample]
@@ -172,7 +197,83 @@ class DataGenerator():
 		np.save('Dataset-Training-Set', self.train_set)
 		print('-- Training set :', len(self.train_set), ' samples.')
 		print('-- Validation set :', len(self.valid_set), ' samples.')
-	
+		'''
+	def _camera_rectification_homography_params(self):
+		"""
+			Load camera params and calculate the rectification homography matrix between any two-camera pair
+			It is necessary to calculate the multiview reprojection loss insighted from epipolar constrains
+			ref: Monet: multiview semi-supervised keypoint via epipolar divergence
+		"""
+		# Load data
+		R = []
+		T = []
+		self.Extrinsic = []
+		self.Intrinsic = []
+		self.Rectification_Homography_Matrix = []
+		# 4 is camera numbers
+		with open(self.camera_extrinsic, encoding='utf-8') as f:
+			extrinsic_file = json.load(f)
+			for i in range(4):
+				R_matrix,_ = cv2.Rodrigues(np.asarray(extrinsic_file['extrinsic_0'+str(i)]['R']))
+				R.append(np.reshape(R_matrix, (3,3)))
+				T.append(np.reshape(np.asarray(extrinsic_file['extrinsic_0'+str(i)]['T']), (3,1)))
+				self.Extrinsic.append(np.concatenate((R[-1], T[-1]), axis = 1))
+
+		with open(self.camera_intrinsic, encoding='utf-8') as f:
+			intrinsic_file = yaml.load(f)
+			for i in range(4):
+				self.Intrinsic.append(np.reshape(np.asarray(intrinsic_file['K'+str(i)]['data']), (3,3)))
+		'''
+		for i in range(4):
+			# !!! Notice T[i] is the current plane to world plane(with T=0)
+			# Step 1: Rrect (same with CMU tutorial 10)
+			r_1 = T[i] / np.linalg.norm(T[i])
+			r_2_T = np.asarray([[-T[i][1], T[i][0], 0]]) / math.sqrt(math.pow(T[i][1],2)+math.pow(T[i][0],2))
+			r_3_T = np.cross(r_1.T, r_2_T, axis=1)
+			Rrect = np.concatenate((r_1.T, r_2_T, r_3_T), axis = 0)
+			# Step 2: Hr = Intrinsic*Rrect*R.T*Intrinsic.-1
+			Hr = np.dot(Intrinsic[i], np.dot(np.dot(Rrect, R[i].T), np.linalg.inv(Intrinsic[i])))
+			Hr = np.squeeze(np.asarray(Hr.tolist()))
+			self.Rectification_Homography_Matrix.append(Hr)
+		'''
+		for i in range(4):
+			# (i,j)是旋转第i个视角到世界坐标系下，然后校正i与j视角的极线
+			# 注意使用时，i与j都会先各自单独旋转到世界坐标系，然后用光心之间的平移去校正
+			# 所以Hr矩阵是定义在两个（一对）相机之间的
+			Homography_matrix_i = [] # from i to other cameras j
+			for j in range(4):
+				if j == i:
+					Homography_matrix_i.append(np.eye(3))
+				else:
+					# Step 1: solve E = [t]_x * R
+					# !!! Notice the negative and positive annotation (same with CMU tutorial 9)
+					
+					R_rel = R[i]
+					'''
+					# TODO: Which one is right??????
+					R_rel = np.dot(R[j], np.linalg.inv(R[i]))
+					T_rel = T[i] - T[j]
+					T_x = [0, -T_rel[2], T_rel[1],
+							T_rel[2], 0, -T_rel[0],
+							-T_rel[1], T_rel[0], 0]
+					T_x = np.reshape(list(map(float, T_x)), (3,3))				
+					E = np.dot(T_x, R_rel)
+					# Step 2: solve Epipole Ee = 0
+					_, S, V = np.linalg.svd(E)
+					e = np.compress(S == np.min(S), V, axis=0)
+					'''
+					e = T[j] - T[i]
+					e = e.T
+					# Step 3: Rrect
+					r_1_T = e / np.linalg.norm(e)
+					r_2_T = np.asarray([[-e[0][1], e[0][0], 0]]) / math.sqrt(math.pow(e[0][1],2)+math.pow(e[0][0],2))
+					r_3_T = np.cross(r_1_T, r_2_T, axis=1)
+					Rrect = np.concatenate((r_1_T, r_2_T, r_3_T), axis = 0)
+					# Step 4: Hr = Intrinsic*Rrect*R.T*Intrinsic.-1 （3*3）
+					Hr = np.dot(self.Intrinsic[i], np.dot(np.dot(Rrect, R_rel.T), np.linalg.inv(self.Intrinsic[i])))
+					Homography_matrix_i.append(Hr)
+			self.Rectification_Homography_Matrix.append(Homography_matrix_i)
+
 	"""
 	# ------------- Ground Truth HeatMap for each joints Creator ------------ 
 	"""
@@ -234,14 +335,14 @@ class DataGenerator():
 		else:
 			print('Color mode supported: RGB/BGR. If you need another mode do it yourself :p')
 
-	def _crop_data(self, height, width, box, joints, boxp = 0.2):
+	def _crop_data(self, height, width, box, joints, boxp = 0.1):
 		""" Automatically returns a padding vector and a bounding box (adapted from labeled data and in the form of [x_center,y_center,x_length,y_length])
 		Args:
 			height		: Original Height
 			width		: Original Width
 			box			: Original bounding Box [x_min,y_min,x_max,y_max]
 			joints		: Array of joints
-			boxp		: Box percentage (Use 20% to get a good bounding box)
+			boxp		: Box percentage (Use 10% to get a good bounding box)
 		"""
 		padding = [[0,0],[0,0],[0,0]]
 		j = np.copy(joints)
@@ -278,17 +379,17 @@ class DataGenerator():
 		crop_box[1] += padding[0][0]
 		return padding, crop_box # padding is for img pad during crop (just in case)
 	
-	def _crop_img(self, img, padding, crop_box):
+	def _crop_img(self, img, padding, box):
 		""" Given a bounding box and padding values return cropped image
 		Args:
 			img			: Source Image
 			padding	    : Padding
-			crop_box	: Bounding Box
+			box	: Bounding Box
 		"""
 		img = np.pad(img, padding, mode = 'constant')
-		max_lenght = max(crop_box[2], crop_box[3]) # choose max in width and height for sure that it's a square.
-		crop_size = max_lenght //2
-		img = img[crop_box[1]-crop_size : crop_box[1]+crop_size, crop_box[0]-crop_size : crop_box[0]+crop_size]
+		max_l = max(box[2], box[3]) # choose max in width and height for sure that it's a square.
+		crop_size = max_l //2
+		img = img[box[1]-crop_size : box[1]+crop_size, box[0]-crop_size : box[0]+crop_size]
 		return img
 	
 	def _relative_joints(self, box, padding, joints, to_size = 64):
@@ -318,45 +419,56 @@ class DataGenerator():
 				normalize		: True to return Image Value between 0 and 1
 		"""
 		while True:
-			train_img = np.zeros((batch_size, 256, 256, 3), dtype = np.float)
-			train_gtmap = np.zeros((batch_size, stacks, 64, 64, len(self.joints_list)), np.float)
-			train_weights = np.zeros((batch_size, len(self.joints_list)), np.float) # visibility of each joint
+			train_img = np.zeros((4, 256, 256, 3), dtype = np.float)
+			train_gtmap = np.zeros((4, stacks, 64, 64, len(self.joints_list)), np.float)
+			train_weights = np.zeros((4, len(self.joints_list)), np.float) # visibility of each joint
+			train_bbox = np.zeros((4, 4), dtype = np.float)
+			train_img_pair = np.zeros((batch_size, 4, 256, 256, 3), dtype = np.float)
+			train_gtmap_pair = np.zeros((batch_size, 4, stacks, 64, 64, len(self.joints_list)), np.float)
+			train_weights_pair = np.zeros((batch_size, 4, len(self.joints_list)), np.float) # visibility of each joint
+			train_bbox_pair = np.zeros((batch_size, 4, 4), dtype = np.float)
 			i = 0
 			while i < batch_size:
 				if sample_set == 'train':
-					name = random.choice(self.train_set)
-				joints = self.data_dict[name]['joints']
-				box = self.data_dict[name]['box']
-				weight = np.asarray(self.data_dict[name]['weights'])
-				train_weights[i] = weight
+					img_pair_name = random.choice(self.img_pair)
+				for index, name in enumerate(img_pair_name):
+					joints = self.data_dict[name]['joints']
+					box = self.data_dict[name]['box']
+					weight = np.asarray(self.data_dict[name]['weights'])
+					train_weights[index] = weight
 
-				img = self.open_img(name)
-				# Create the bounding box according to joints
-				# Notice cbox[0][1] is the center of the img
-				# and cbox[2][3] is the crop img size
-				padd, cbox = self._crop_data(img.shape[0], img.shape[1], box, joints, boxp = 0.2)
-				# joints location with relative representations
-				new_j = self._relative_joints(cbox, padd, joints, to_size=64)
-				gt_heatmap = self._generate_hm(64, 64, new_j, 64, weight) # size of gt_heatmap = 64*64*9
-				img = self._crop_img(img, padd, cbox)
+					img = self.open_img(name)
+					# Create the bounding box according to joints
+					# Notice cbox[0][1] is the center of the img
+					# and cbox[2][3] is the crop img size
+					padd, cbox = self._crop_data(img.shape[0], img.shape[1], box, joints, boxp = 0.1)
+					train_bbox[index] = cbox
+					# joints location with relative representations
+					new_j = self._relative_joints(cbox, padd, joints, to_size=64)
+					gt_heatmap = self._generate_hm(64, 64, new_j, 64, weight) # size of gt_heatmap = 64*64*9
+					img = self._crop_img(img, padd, cbox)
 
-				img = img.astype(np.uint8)
-				img = scm.imresize(img, (256,256)) # 256,256,3
-				#img, gt_heatmap = self._augment(img, gt_heatmap)
-				gt_heatmap = np.expand_dims(gt_heatmap, axis = 0)
-				gt_heatmap = np.repeat(gt_heatmap, stacks, axis = 0)# convert to 4*64*64*9
-				# use stack = 4 for intermediate supervision
-				if normalize:
-					train_img[i] = img.astype(np.float) / 255
-				else :
-					train_img[i] = img.astype(np.float) # 4(natch_size)*256*256*3(RGB)
-				train_gtmap[i] = gt_heatmap # 4(batch_size)*4(nStack)*64*64*9(joints number)
+					img = img.astype(np.uint8)
+					img = scm.imresize(img, (256,256)) # 256,256,3
+					#img, gt_heatmap = self._augment(img, gt_heatmap)
+					gt_heatmap = np.expand_dims(gt_heatmap, axis = 0)
+					gt_heatmap = np.repeat(gt_heatmap, stacks, axis = 0)# convert to 4*64*64*9
+					# use stack = 4 for intermediate supervision
+					if normalize:
+						train_img[index] = img.astype(np.float) / 255
+					else :
+						train_img[index] = img.astype(np.float) # 4(natch_size)*256*256*3(RGB)
+					train_gtmap[index] = gt_heatmap # 4(batch_size)*4(nStack)*64*64*9(joints number)
+				train_weights_pair[i] = train_weights
+				train_img_pair[i] = train_img
+				train_gtmap_pair[i] = train_gtmap
+				train_bbox_pair[i] = train_bbox
 				i = i + 1
 				'''
 				except :
 					print(' [!] Error file: ', name)
 				'''
-			yield train_img, train_gtmap, train_weights # It's really intelligent to use yield and next!!
+			yield train_img_pair, train_gtmap_pair, train_weights_pair, train_bbox_pair # It's really intelligent to use yield and next!!
 			
 	def generator(self, batchSize = 4, stacks = 4, norm = True, sample = 'train'):
 		""" Create a Sample Generator
@@ -380,10 +492,8 @@ class DataGenerator():
 
 	"""
 	# ----------------------- Other utils ----------------------------------
-	"""
-
 	# ---------------------------- Debugger --------------------------------				
-	
+	"""
 	# unused
 	def plot_img(self, name, plot = 'cv2'):
 		""" Plot an image
