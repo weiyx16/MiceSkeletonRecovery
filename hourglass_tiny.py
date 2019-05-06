@@ -27,7 +27,7 @@ class HourglassModel():
 	"""
 	def __init__(self, gpu_frac = 0.75, nFeat = 256, nStack = 4, nModules = 1, nLow = 4, outputDim = 4, batch_size = 4, 
 		drop_rate = 0.2, lear_rate = 2.5e-4, decay = 0.96, decay_step = 100, dataset = None, training = True, 
-		w_summary = True, logdir_train = None, logdir_test = None, tiny = True,
+		w_summary = False, logdir_train = None, logdir_test = None, tiny = True,
 		w_loss = False, name = 'mice_tiny_hourglass', model_save_dir = None, joints = ['nose','r_ear','l_ear','tail_base']):
 		""" Initializer
 		Args:
@@ -42,7 +42,7 @@ class HourglassModel():
 			decay_step			: Step to apply decay
 			dataset				: Dataset (class DataGenerator)
 			training			: (bool) True for training / False for prediction
-			w_summary			: (bool) True/False for summary of weight (to visualize in Tensorboard) (set true)
+			w_summary			: (bool) True/False for summary of weight (to visualize in Tensorboard) (set false)
 			w_loss				: (bool) used to weighted loss (didn't calculate loss on unvisible joints)
 			tiny				: (bool) Activate Tiny Hourglass
 			name				: name of the model
@@ -157,7 +157,6 @@ class HourglassModel():
 				self.output_list.append(self._graph_hourglass(self.img[:,i,:,:,:]))
 				print('-- -- Model Graph for No. %d' %(i), ' View')
 			self.output = tf.stack(self.output_list, axis=1)
-
 			graphTime = time.time()
 			print('-- Model Graph : Done (' + str(int(abs(graphTime-inputTime))) + ' sec.)')
 
@@ -168,7 +167,7 @@ class HourglassModel():
 				else:
 					self.gt_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.output, labels= self.gtMaps), name= 'cross_entropy_loss')
 				# Introduce reprojection loss 
-				self.geometry_loss = tf.reduce_mean(self.camera_reproject_loss(), name='reduced_camera_reproject_loss')
+				self.geometry_loss = tf.reduce_mean(self.weighted_bce_loss(), name='reduced_camera_reproject_loss') # tf.reduce_mean(self.camera_reproject_loss(), name='reduced_camera_reproject_loss')
 				self.loss = tf.add(self.gt_loss, self.geometry_loss)
 			lossTime = time.time()	
 			print('-- Model Loss : Done (' + str(int(abs(lossTime-graphTime))) + ' sec.)')
@@ -226,12 +225,14 @@ class HourglassModel():
 		
 		with tf.device(self.cpu):
 			self.saver = tf.train.Saver() #, keep_checkpoint_every_n_hours=2)
-
+		
 		with tf.device(self.gpu):
 			self.train_summary = tf.summary.FileWriter(self.logdir_train, tf.get_default_graph())
 			self.test_summary = tf.summary.FileWriter(self.logdir_test)
 			#self.weight_summary = tf.summary.FileWriter(self.logdir_train, tf.get_default_graph()) # don't write down the summary of weighs for now
 		
+		summTime = time.time()
+		print('-- Model Saver & Summary : Done (' + str(int(abs(summTime-initTime))) + ' sec.)')
 		# use merge_all to (use to merge all ops/scalar/histogram to save in the train collection)
 		# E.g. use: tf.summary.FileWriter(log_dir).add_summary(self.train_op or self.weight_op, epoch*epochSize + i)
 		self.train_op = tf.summary.merge_all('train')
@@ -240,7 +241,7 @@ class HourglassModel():
 		endTime = time.time()
 		print('>>>>> Model created in (' + str(int(abs(endTime-startTime))) + ' sec.)')
 		# every time is an object and if we don't need them then remove them
-		del endTime, startTime, initTime, optimTime, minimTime, lrTime, accurTime, lossTime, graphTime, inputTime		
+		del endTime, startTime, initTime, optimTime, minimTime, lrTime, accurTime, lossTime, graphTime, inputTime, summTime		
 	
 	def weighted_bce_loss(self):
 		""" Create Weighted Loss Function
@@ -475,8 +476,10 @@ class HourglassModel():
 								feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.bbox: bbox_train })
 						# Save summary (Loss + Accuracy)
 						# FileWriter to logdir_train
+						
 						self.train_summary.add_summary(train_summary, epoch*epochSize + i)
 						self.train_summary.flush()
+						
 					else:
 						if self.w_loss:
 							_, cur_loss, cur_geometry_loss = self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss], 
@@ -494,9 +497,10 @@ class HourglassModel():
 					weight_summary = self.Session.run(self.weight_op, {self.img : img_train, self.gtMaps: gt_train, self.weights: weight_train, self.bbox: bbox_train})
 				else :
 					weight_summary = self.Session.run(self.weight_op, {self.img : img_train, self.gtMaps: gt_train, self.bbox: bbox_train})
+				
 				self.train_summary.add_summary(weight_summary, epoch)
 				self.train_summary.flush()
-
+				
 				print('\n-- Epoch ' + str(epoch) + '/' + str(nEpochs) + ' done in ' + str(int(epochfinishTime-epochstartTime)) + ' sec.\n'
 					 + ' - time_per_batch: ' + str(((epochfinishTime-epochstartTime)/epochSize))[:4] + ' sec.', ' - cost_per_batch: ' + str(avg_cost))
 
@@ -525,7 +529,7 @@ class HourglassModel():
 				'''
 			print('>>>>> Training Done')
 			print('-- Resume:' + '\n' + '  Epochs: ' + str(nEpochs) + '\n' + '  n. Images: ' + str(nEpochs * epochSize * self.batchSize) )
-			print('-- Final Loss: ' + str(cost) + '\n' + ' Loss Discimination: ' + str(100*self.resume['loss'][-1]/(self.resume['loss'][0] + 0.1)) + '%' )
+			print('-- Final Loss: ' + str(cost) + '\n' + ' Loss Discimination: ' + str(100*self.resume['loss'][-1]/(self.resume['loss'][0] + 0.001)) + '%' )
 			# print('-- Relative Accurancy Improvement: ' + str((self.resume['err'][-1] - self.resume['err'][0]) * 100) +'%')
 			print('-- Training Time: ' + str(datetime.timedelta(seconds=time.time() - startTime)))
 			
@@ -621,7 +625,7 @@ class HourglassModel():
 			Args:
 				inputs : TF Tensor (placeholder) of shape (None, 3, 256, 256) (The size of self.img)
 		"""
-		with tf.variable_scope('model'):
+		with tf.variable_scope('model') as scope:
 			# preprocess the image
 			with tf.variable_scope('preprocessing'):
 				# Input Dim : batchsize x 256 x 256 x 3
@@ -749,12 +753,12 @@ class HourglassModel():
 		Returns:
 			norm			: Output Tensor
 		"""
+		
 		with tf.variable_scope(name) as scope:
 			# initialize the kernel weight using xavier method
 			try:
 				kernel = tf.get_variable(name+'_weights', initializer = tf.contrib.layers.xavier_initializer(uniform=False)([kernel_size,kernel_size, inputs.get_shape().as_list()[1], filters]))
 			except ValueError:
-				# print('reuse variables here')
 				scope.reuse_variables()
 				kernel = tf.get_variable(name+'_weights')
 			
@@ -765,7 +769,21 @@ class HourglassModel():
 					# Adding a histogram summary makes it possible to visualize your data's distribution in TensorBoard
 					tf.summary.histogram('weights_summary', kernel, collections = ['weight'])
 			return norm
-	
+		'''
+		with tf.variable_scope(name, reuse=tf.AUTO_REUSE) as scope:
+			# initialize the kernel weight using xavier method
+			kernel = tf.get_variable(name+'_weights', initializer = tf.contrib.layers.xavier_initializer(uniform=False)([kernel_size,kernel_size, inputs.get_shape().as_list()[1], filters]))
+			conv = tf.nn.conv2d(inputs, kernel, [1,1,strides,strides], padding='VALID', data_format='NCHW')
+			norm = tf.contrib.layers.batch_norm(conv, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training, data_format='NCHW', reuse=tf.AUTO_REUSE, scope=scope)
+			print(conv)
+			print(norm)
+			print(kernel)
+			if self.w_summary:
+				with tf.device('/cpu:0'):
+					# Adding a histogram summary makes it possible to visualize your data's distribution in TensorBoard
+					tf.summary.histogram('weights_summary', kernel, collections = ['weight'])
+			return norm
+		'''
 	def _conv_block(self, inputs, numOut, name = 'conv_block'):
 		""" Convolutional Block `Cascaded conv2d used in Residual unit` (Main-stream)
 		
@@ -783,17 +801,17 @@ class HourglassModel():
 				conv = self._conv(pad, int(numOut), kernel_size=3, strides=1, name= 'conv')
 				return conv
 		else:
-			with tf.variable_scope(name):
+			with tf.variable_scope(name) as scope:
 				# Standard convolution in the paper with kernel size [1 -> 3 -> 1]
 				with tf.variable_scope(name+'norm_1'):
-					norm_1 = tf.contrib.layers.batch_norm(inputs, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training)
+					norm_1 = tf.contrib.layers.batch_norm(inputs, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training, data_format='NCHW', reuse=tf.AUTO_REUSE, scope=scope)
 					conv_1 = self._conv(norm_1, int(numOut/2), kernel_size=1, strides=1, name= 'conv')
 				with tf.variable_scope(name+'norm_2'):
-					norm_2 = tf.contrib.layers.batch_norm(conv_1, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training)
+					norm_2 = tf.contrib.layers.batch_norm(conv_1, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training, data_format='NCHW', reuse=tf.AUTO_REUSE, scope=scope)
 					pad = tf.pad(norm_2, np.array([[0,0],[0,0],[1,1],[1,1]]), name= 'pad')
 					conv_2 = self._conv(pad, int(numOut/2), kernel_size=3, strides=1, name= 'conv')
 				with tf.variable_scope(name+'norm_3'):
-					norm_3 = tf.contrib.layers.batch_norm(conv_2, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training)
+					norm_3 = tf.contrib.layers.batch_norm(conv_2, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training, data_format='NCHW', reuse=tf.AUTO_REUSE, scope=scope)
 					conv_3 = self._conv(norm_3, int(numOut), kernel_size=1, strides=1, name= 'conv')
 				return conv_3
 	
