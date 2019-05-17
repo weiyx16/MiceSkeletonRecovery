@@ -21,6 +21,7 @@ import time
 import scipy.misc as scm
 import json
 import yaml
+import scipy
 
 class DataGenerator():
 	""" 
@@ -223,57 +224,61 @@ class DataGenerator():
 			intrinsic_file = yaml.load(f)
 			for i in range(4):
 				self.Intrinsic.append(np.reshape(np.asarray(intrinsic_file['K'+str(i)]['data']), (3,3)))
-		'''
-		for i in range(4):
-			# !!! Notice T[i] is the current plane to world plane(with T=0)
-			# Step 1: Rrect (same with CMU tutorial 10)
-			r_1 = T[i] / np.linalg.norm(T[i])
-			r_2_T = np.asarray([[-T[i][1], T[i][0], 0]]) / math.sqrt(math.pow(T[i][1],2)+math.pow(T[i][0],2))
-			r_3_T = np.cross(r_1.T, r_2_T, axis=1)
-			Rrect = np.concatenate((r_1.T, r_2_T, r_3_T), axis = 0)
-			# Step 2: Hr = Intrinsic*Rrect*R.T*Intrinsic.-1
-			Hr = np.dot(Intrinsic[i], np.dot(np.dot(Rrect, R[i].T), np.linalg.inv(Intrinsic[i])))
-			Hr = np.squeeze(np.asarray(Hr.tolist()))
-			self.Rectification_Homography_Matrix.append(Hr)
-		'''
-		for i in range(4):
+
+		# 只计算相邻视角的Rrect矩阵，相邻视角为:(00,02),(00,01),(01,03),(02,03)
+		camera_pair = [[0,1],[0,2],[1,3],[2,3]]
+		for pair_index in range(4):
 			# (i,j)是旋转第i个视角到世界坐标系下，然后校正i与j视角的极线
 			# 注意使用时，i与j都会先各自单独旋转到世界坐标系，然后用光心之间的平移去校正
 			# 所以Hr矩阵是定义在两个（一对）相机之间的
-			Homography_matrix_i = [] # from i to other cameras j
-			for j in range(4):
-				if j == i:
-					Homography_matrix_i.append(np.eye(3))
-				else:
-					# Step 1: solve E = [t]_x * R
-					# !!! Notice the negative and positive annotation (same with CMU tutorial 9)
-					
-					R_rel = R[i]
-					'''
-					# TODO: Which one is right??????
-					R_rel = np.dot(R[j], np.linalg.inv(R[i]))
-					T_rel = T[i] - T[j]
-					T_x = [0, -T_rel[2], T_rel[1],
-							T_rel[2], 0, -T_rel[0],
-							-T_rel[1], T_rel[0], 0]
-					T_x = np.reshape(list(map(float, T_x)), (3,3))				
-					E = np.dot(T_x, R_rel)
-					# Step 2: solve Epipole Ee = 0
-					_, S, V = np.linalg.svd(E)
-					e = np.compress(S == np.min(S), V, axis=0)
-					'''
-					e = T[j] - T[i]
-					e = e.T
-					# Step 3: Rrect
-					r_1_T = e / np.linalg.norm(e)
-					r_2_T = np.asarray([[-e[0][1], e[0][0], 0]]) / math.sqrt(math.pow(e[0][1],2)+math.pow(e[0][0],2))
-					r_3_T = np.cross(r_1_T, r_2_T, axis=1)
-					Rrect = np.concatenate((r_1_T, r_2_T, r_3_T), axis = 0)
-					# Step 4: Hr = Intrinsic*Rrect*R.T*Intrinsic.-1 （3*3）
-					Hr = np.dot(self.Intrinsic[i], np.dot(np.dot(Rrect, R_rel.T), np.linalg.inv(self.Intrinsic[i])))
-					Homography_matrix_i.append(Hr)
-			self.Rectification_Homography_Matrix.append(Homography_matrix_i)
+			Homography_matrix_lr = [] # from i to other cameras j
+			camera_l = camera_pair[pair_index][0]
+			camera_r = camera_pair[pair_index][1]
+			
+			# Step 1: solve E = [t]_x * R
+			# !!! Notice the negative and positive annotation (same with CMU tutorial 9)
+			# 解法：Bouguet 参考opencv.cvStereoRectify,非标准解法
+			# https://github.com/opencv/opencv/blob/19cf5118957cf9cb86022e44998f652ddaa5d887/modules/calib3d/src/calibration.cpp
+			
+			R_rel = np.dot(R[camera_r], np.transpose(R[camera_l]))
+			R_l = scipy.linalg.sqrtm(R_rel) #R_r.T = R_l
+			R_l = R_l.real
+			R_r = np.linalg.inv(R_l)
+			# T_rel = T[camera_l] - T[camera_r]
+			# T_x = [0, -T_rel[2], T_rel[1],
+			# 		T_rel[2], 0, -T_rel[0],
+			# 		-T_rel[1], T_rel[0], 0]
+			# T_x = np.reshape(list(map(float, T_x)), (3,3))				
+			# E = np.dot(T_x, R_rel)
+			# # Step 2: solve Epipole Ee = 0
+			# _, S, V = np.linalg.svd(E)
+			# e = np.compress(S == np.min(S), V, axis=0)
 
+			t = np.dot(R_r, T[camera_r] - T[camera_l])
+			if (abs(t[0])>abs(t[1])):
+				idx = 0
+			else:
+				idx = 1
+
+			e = t.T
+			# Step 3: Rrect
+			r_1_T = e / np.linalg.norm(e)
+			r_2_T = np.asarray([[-e[0][1], e[0][0], 0]]) / math.sqrt(math.pow(e[0][1],2)+math.pow(e[0][0],2))
+			r_3_T = np.cross(r_1_T, r_2_T, axis=1)
+			if idx == 0:
+				r_1_T = -r_1_T
+				r_2_T = -r_2_T
+				Rrect = np.concatenate((r_1_T, r_2_T, r_3_T), axis = 0)
+			else:
+				Rrect = np.concatenate((-r_2_T, -r_1_T, -r_3_T), axis = 0)
+		
+			Hr_l = np.dot(self.Intrinsic[camera_l], np.dot(np.dot(Rrect, R_r.T), np.linalg.inv(self.Intrinsic[camera_l])))
+			Hr_r = np.dot(self.Intrinsic[camera_r], np.dot(np.dot(Rrect, R_r), np.linalg.inv(self.Intrinsic[camera_r])))
+
+			Homography_matrix_lr.append(Hr_l)
+			Homography_matrix_lr.append(Hr_r)
+			self.Rectification_Homography_Matrix.append(Homography_matrix_lr)
+		print(self.Rectification_Homography_Matrix)
 	"""
 	# ------------- Ground Truth HeatMap for each joints Creator ------------ 
 	"""

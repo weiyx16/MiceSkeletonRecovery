@@ -18,6 +18,9 @@ import datetime
 import os
 import cv2
 from tqdm import tqdm
+from skimage.transform import ProjectiveTransform, warp
+
+debug = False
 
 class HourglassModel():
 	""" 
@@ -167,7 +170,7 @@ class HourglassModel():
 				else:
 					self.gt_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.output, labels= self.gtMaps), name= 'cross_entropy_loss')
 				# Introduce reprojection loss 
-				self.geometry_loss = tf.reduce_mean(self.weighted_bce_loss(), name='reduced_camera_reproject_loss') # tf.reduce_mean(self.camera_reproject_loss(), name='reduced_camera_reproject_loss')
+				self.geometry_loss = tf.reduce_mean(self.camera_reproject_loss(), name='reduced_camera_reproject_loss')
 				self.loss = tf.add(self.gt_loss, self.geometry_loss)
 			lossTime = time.time()	
 			print('-- Model Loss : Done (' + str(int(abs(lossTime-graphTime))) + ' sec.)')
@@ -277,52 +280,53 @@ class HourglassModel():
 			# First step: warp the heatmaps by the Hh matrix	
 			# Second step: calculate (a,b) and the loss for this frame
 			cur_project_loss = tf.zeros([1,])
-			for camera_view_i in range(output_shape[1]):
-				# Camera_view
-				for camera_view_j in range(output_shape[1]):
-					if camera_view_i == camera_view_j:
-						pass
-					else:
-						# warp matrix Hh
-						# Hh is defined on two-paired heatmaps (and its coordinate)
-						# but the Hr is defined on two-paired source size image (and its coordinate)
-						Hr_i = self.dataset.Rectification_Homography_Matrix[camera_view_i][camera_view_j]
-						Hh_i_matrix = self._warp_matrix(self.bbox[batch_index,camera_view_i,:], Hr_i)
-						Hr_j = self.dataset.Rectification_Homography_Matrix[camera_view_j][camera_view_i]
-						Hh_j_matrix = self._warp_matrix(self.bbox[batch_index,camera_view_j,:], Hr_j)
-
-						#for stack_index in range(output_shape[2]):
-						# Only calculate on the final stack for now
-						for joint_index in range(output_shape[5]):
-							# Each_joints
-							# warp images 
-							heatmap_src_i = self.output[batch_index,camera_view_i, output_shape[2]-1, :,:,joint_index]
-							heatmap_warp_i = self._warp_img(heatmap_src_i, Hh_i_matrix)
-							heatmap_src_j = self.output[batch_index,camera_view_j, output_shape[2]-1, :,:,joint_index]
-							heatmap_warp_j = self._warp_img(heatmap_src_j, Hh_j_matrix)							
-							# TODO: 2019.5.4 check the warp function and its result
-
-							# a, b: for every v in warped image i: av+b is coorsponding row in warped image j
-							f_yi = self.dataset.Intrinsic[camera_view_i][1,1]
-							f_yj = self.dataset.Intrinsic[camera_view_j][1,1]
-							p_yi = self.dataset.Intrinsic[camera_view_i][1,2]
-							p_yj = self.dataset.Intrinsic[camera_view_j][1,2]
-							a = tf.cast(tf.div(f_yj, f_yi), 'float32')
-							b = tf.cast(tf.add(-p_yj, tf.multiply(tf.div(-f_yj, f_yi), p_yi)), 'float32')
-							# Qi, Qj_i
-							v = tf.linspace(0.0, 63.0, 64)
-							a = tf.add(tf.zeros_like(v), a)
-							v_j = tf.add(a*v, b)
-							v_j = tf.cast(tf.floor(tf.clip_by_value(v_j, 0.0, 63.0)), 'int32')
-							v_j = tf.reshape(v_j, (v_j.shape[0], 1))
-							Q_hat_i = tf.reduce_max(heatmap_warp_i, axis = 1)
-							Q_hat_j = tf.reduce_max(tf.gather_nd(heatmap_warp_j, v_j), axis = 1)
-							# Calculate loss
-							cur_project_loss += tf.reduce_sum(Q_hat_i*tf.log(tf.div(Q_hat_i, Q_hat_j)))
+			camera_pair = [[0,1],[0,2],[1,3],[2,3]]
+			for pair_index in range(4):
+				camera_view_i = camera_pair[pair_index][0]
+				camera_view_j = camera_pair[pair_index][1]
+				# In sum: 4 pairs
+				# warp matrix Hh
+				# Hh is defined on two-paired heatmaps (and its coordinate)
+				# but the Hr is defined on two-paired source size image (and its coordinate)
+				Hr_i = self.dataset.Rectification_Homography_Matrix[pair_index][0]
+				self.Hh_i_matrix = self._warp_matrix(self.bbox[batch_index,camera_view_i,:], Hr_i)
+				Hr_j = self.dataset.Rectification_Homography_Matrix[pair_index][1]
+				self.Hh_j_matrix = self._warp_matrix(self.bbox[batch_index,camera_view_j,:], Hr_j)
+				#for stack_index in range(output_shape[2]):
+				# Only calculate on the final stack for now
+				for joint_index in range(output_shape[5]):
+					# Each_joints
+					# warp images 
+					# test_matrix = np.eye(3); test_matrix[0,2] = 10; test_matrix = tf.convert_to_tensor(test_matrix)	
+					self.heatmap_src_i = self.output[batch_index,camera_view_i, output_shape[2]-1, :,:,joint_index]
+					# self.heatmap_warp_i = warp(np.asarray(self.heatmap_src_i), np.asarray(tf.matrix_inverse(Hh_i_matrix)))
+					self.heatmap_warp_i = self._warp_img(self.heatmap_src_i, self.Hh_i_matrix)
+					self.heatmap_src_j = self.output[batch_index,camera_view_j, output_shape[2]-1, :,:,joint_index]
+					# self.heatmap_warp_j = warp(np.asarray(self.heatmap_src_j), np.asarray(tf.matrix_inverse(Hh_j_matrix)))
+					self.heatmap_warp_j = self._warp_img(self.heatmap_src_j, self.Hh_j_matrix)							
+					
+					# print('For current pair and joint %d image pairs warp done' %(joint_index))
+					# a, b: for every v in warped image i: av+b is coorsponding row in warped image j
+					f_yi = self.dataset.Intrinsic[camera_view_i][1,1]
+					f_yj = self.dataset.Intrinsic[camera_view_j][1,1]
+					p_yi = self.dataset.Intrinsic[camera_view_i][1,2]
+					p_yj = self.dataset.Intrinsic[camera_view_j][1,2]
+					a = tf.cast(tf.div(f_yj, f_yi), 'float32')
+					b = tf.cast(tf.add(p_yj, tf.multiply(tf.div(-f_yj, f_yi), p_yi)), 'float32')
+					# Qi, Qj_i
+					v = tf.linspace(0.0, output_shape[4]-1, output_shape[4])
+					a = tf.add(tf.zeros_like(v), a)
+					v_j = tf.add(a*v, b)
+					v_j = tf.cast(tf.floor(tf.clip_by_value(v_j, 0.0, output_shape[4]-1)), 'int32')
+					v_j = tf.reshape(v_j, (v_j.shape[0], 1))
+					Q_hat_i = tf.reduce_max(self.heatmap_warp_i, axis = 1)
+					Q_hat_j = tf.reduce_max(tf.gather_nd(self.heatmap_warp_j, v_j), axis = 1)
+					# Calculate loss
+					cur_project_loss += tf.reduce_sum(-Q_hat_i*tf.log(tf.clip_by_value(tf.div(Q_hat_i, Q_hat_j),1e-10,1.0)))
 			self.project_loss.append(cur_project_loss)
 			print('-- -- Geometry Loss for No. %d' %(batch_index), ' batch')
-		self.project_loss = tf.stack(self.project_loss, axis=0)
-		return self.project_loss#tf.reduce_sum(self.project_loss, axis=[1, 2, 3], keepdims=True)		
+		self.project_loss_all = tf.stack(self.project_loss, axis=0)
+		return self.project_loss_all #tf.reduce_sum(self.project_loss, axis=[1, 2, 3], keepdims=True)		
 	
 	def _warp_matrix(self, bbox, Hr):
 		"""
@@ -330,24 +334,30 @@ class HourglassModel():
 			Because the Hr matrix is defined on the source img
 			ref: Monet: multiview semi-supervised keypoint via epipolar divergence
 		"""
-		s_h = 64 / 256 # output heatmap / input network cropped image
-		Hc = np.asarray([[s_h, 0, 0],
-						[0, s_h, 0],
-						[0, 0, 1]], dtype=np.float)
-		Hc_inv = tf.cast(tf.matrix_inverse(tf.convert_to_tensor(Hc)), 'float32')
-		s = 256 / tf.maximum(bbox[2], bbox[3]) #tf.cast(256 / tf.maximum(bbox[2], bbox[3]), 'float32') # input network cropped image size / source cropped image size
+	    # Test for new area
+		bbox_src = [bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]
+		bbox_new_view = []
+		for i in range(2):
+			for j in range(2):
+				corner = tf.expand_dims(tf.convert_to_tensor([bbox_src[i*2], bbox_src[2*j+1],1]), -1)
+				corner_new = tf.matmul(tf.cast(tf.convert_to_tensor(Hr), 'float32'), corner)
+				corner_new = corner_new / corner_new[2] # tf.div(corner_new[0], corner_new[2])
+				bbox_new_view.append(tf.squeeze(tf.transpose(corner_new[:2], (1,0))))
+		bbox_new_view = tf.stack(bbox_new_view, axis=0)
+		bbox_new_view = tf.stack([tf.reduce_min(bbox_new_view, 0)[0], tf.reduce_min(bbox_new_view, 0)[1],tf.reduce_max(bbox_new_view, 0)[0], tf.reduce_max(bbox_new_view, 0)[1]])
+		bbox_new_view = tf.stack([bbox_new_view[0], bbox_new_view[1], bbox_new_view[2] - bbox_new_view[0], bbox_new_view[3] - bbox_new_view[1]])
+		s = 64 / tf.maximum(bbox[2], bbox[3]) #tf.cast(256 / tf.maximum(bbox[2], bbox[3]), 'float32') # input network cropped image size / source cropped image size
 		Hb = tf.convert_to_tensor([[s, 0, -s*bbox[0]],
 									[0, s, -s*bbox[1]],
 									[0, 0, 1]])
 		Hb_inv = tf.cast(tf.matrix_inverse(Hb), 'float32')
-		Hb_hat = tf.convert_to_tensor([[s, 0, -s*bbox[0]],
-										[0, s, -s*bbox[1]],
-										[0, 0, 1]])
-		Hc_hat = np.asarray([[s_h, 0, 0],
-							[0, s_h, 0],
-							[0, 0, 1]], dtype=np.float32)
-		Hc_hat = tf.convert_to_tensor(Hc_hat)
-		return tf.matmul(tf.matmul(tf.matmul(Hc_hat, Hb_hat),tf.cast(tf.convert_to_tensor(Hr), 'float32')), tf.matmul(Hb_inv, Hc_inv))
+		s_2 = 64 / tf.maximum(bbox_new_view[2], bbox_new_view[3])
+		Hb_hat = tf.convert_to_tensor([[s_2, 0, -s_2*bbox_new_view[0]],
+										[0, s_2, -s_2*bbox_new_view[1]],
+										[0, 0, 1.0]])
+		Hb_hat = tf.cast(Hb_hat, 'float32')
+
+		return tf.matmul(tf.matmul(Hb_hat,tf.cast(tf.convert_to_tensor(Hr), 'float32')), Hb_inv)
 
 	def _warp_img(self, heatmap_src, Hh):
 		"""
@@ -355,6 +365,9 @@ class HourglassModel():
 			heatmap_warp(x) = heatmap_src(Hh^-1 * x)
 			ref: Spatial Transformer Networks NIPS 2015 (include warping as part of the network with parameter to be learned)
 			# we don't need to learn the warp parameters here
+			# Notice the warping matrix is a little different from the one on pixel:
+			[Matrix] * [x,y,1] -> [x',y',1]
+			But in interpolate function, use grid to stand for the pixel location and [0,63] -> linespace[0,63]
 		"""
 		# the input and output can have different size
 		out_height = tf.shape(heatmap_src)[0]
@@ -367,11 +380,11 @@ class HourglassModel():
 		T_g = T_g / T_g[2]
 		x_s_flat = T_g[0,:]
 		y_s_flat = T_g[1,:]
-		heatmap_warp_flat = self._interpolate(heatmap_src, x_s_flat, y_s_flat)
-		return tf.reshape(heatmap_warp_flat, tf.stack([out_height, out_width]))
+		heatmap_warp = tf.expand_dims(tf.reshape(self._interpolate(heatmap_src, x_s_flat, y_s_flat), tf.stack([out_height, out_width])), -1)
+		return heatmap_warp
 
 	def _meshgrid(self, height, width):
-		with tf.variable_scope('_meshgrid'):
+		with tf.variable_scope('warping_meshgrid'):
 			# This should be equivalent to:
 			#  x_t, y_t = np.meshgrid(np.linspace(-1, 1, width),
 			#                         np.linspace(-1, 1, height))
@@ -379,12 +392,15 @@ class HourglassModel():
 			#  grid = np.vstack([x_t.flatten(), y_t.flatten(), ones])
 			
 			x_t = tf.matmul(tf.ones(shape=tf.stack([height, 1])),
-			                tf.transpose(tf.expand_dims(tf.linspace(-1.0, 1.0, width), 1), [1, 0]))
-			y_t = tf.matmul(tf.expand_dims(tf.linspace(-1.0, 1.0, height), 1),
-			                tf.ones(shape=tf.stack([1, width])))
+			                tf.transpose(tf.expand_dims(tf.linspace(0.0, tf.cast(width, 'float32') - tf.constant(1.0), width), 1), [1, 0])) # 64*1 * 1*64
+			y_t = tf.matmul(tf.expand_dims(tf.linspace(0.0, tf.cast(height, 'float32') - tf.constant(1.0), height), 1),
+			                tf.ones(shape=tf.stack([1, width]))) # 64*1 * 1*64
+			# y_t: [1...1]      x_t: [1 ..0.. -1]
+			#      .0...0.            . ..0.. .
+			#      [-1...-1]		 [1 ..0.. -1]
 			x_t_flat = tf.reshape(x_t, (1, -1))
 			y_t_flat = tf.reshape(y_t, (1, -1))
-			ones = tf.ones_like(x_t_flat)		
+			ones = tf.ones_like(x_t_flat)
 			grid = tf.concat([x_t_flat, y_t_flat, ones], 0)
 			return grid
 
@@ -401,10 +417,6 @@ class HourglassModel():
 			x = tf.cast(x, 'float32')
 			y = tf.cast(y, 'float32')
 			
-			# scale indices from [-1, 1] to [0, width/height]
-			x = (x + 1.0) * (width_f) / 2.0
-			y = (y + 1.0) * (height_f) / 2.0
-			
 			# bilinear sampling
 			x0 = tf.cast(tf.floor(x), 'int32')
 			x1 = x0 + 1
@@ -416,6 +428,12 @@ class HourglassModel():
 			y0 = tf.clip_by_value(y0, 0, height - 1)
 			y1 = tf.clip_by_value(y1, 0, height - 1)
 
+			# calculate interpolated values with weights
+			x0_f = tf.cast(x0, 'float32')
+			x1_f = tf.cast(x1, 'float32')
+			y0_f = tf.cast(y0, 'float32')
+			y1_f = tf.cast(y1, 'float32')
+			
 			# Use 1-D index instead of 2-D index, so take the width into consideration
 			base_y0 = y0 * width
 			base_y1 = y1 * width
@@ -429,11 +447,7 @@ class HourglassModel():
 			Ib = tf.expand_dims(tf.gather(im_flat, idx_b), 1)
 			Ic = tf.expand_dims(tf.gather(im_flat, idx_c), 1)
 			Id = tf.expand_dims(tf.gather(im_flat, idx_d), 1)
-			# calculate interpolated values with weights
-			x0_f = tf.cast(x0, 'float32')
-			x1_f = tf.cast(x1, 'float32')
-			y0_f = tf.cast(y0, 'float32')
-			y1_f = tf.cast(y1, 'float32')
+
 			wa = tf.expand_dims(((x1_f - x) * (y1_f - y)), 1)
 			wb = tf.expand_dims(((x1_f - x) * (y - y0_f)), 1)
 			wc = tf.expand_dims(((x - x0_f) * (y1_f - y)), 1)
@@ -469,27 +483,43 @@ class HourglassModel():
 					# the saveStep is the step to save summary not the model
 					if i % saveStep == saveStep - 1:
 						if self.w_loss:
-							_, cur_loss, cur_geometry_loss, train_summary = self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss, self.train_op], 
+							_, cur_loss, cur_geometry_loss, gt_loss, train_summary = self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss, self.gt_loss, self.train_op], 
 								feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.weights: weight_train, self.bbox: bbox_train})
 						else:
-							_, cur_loss, cur_geometry_loss, train_summary = self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss, self.train_op], 
+							_, cur_loss, cur_geometry_loss, gt_loss, train_summary = self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss, self.gt_loss, self.train_op], 
 								feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.bbox: bbox_train })
 						# Save summary (Loss + Accuracy)
 						# FileWriter to logdir_train
-						
+						print(' [**] Saving summary here...')
 						self.train_summary.add_summary(train_summary, epoch*epochSize + i)
 						self.train_summary.flush()
 						
 					else:
 						if self.w_loss:
-							_, cur_loss, cur_geometry_loss = self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss], 
-								feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.weights: weight_train, self.bbox: bbox_train})
+							# DEBUGGER
+							if debug:
+								_, cur_loss, cur_geometry_loss, gt_loss, Hh_i_matrix, Hh_j_matrix, heatmap_src_i, heatmap_src_j, heatmap_warp_i, heatmap_warp_j = \
+									self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss, self.gt_loss, self.Hh_i_matrix, self.Hh_j_matrix, 
+										self.heatmap_src_i, self.heatmap_src_j, self.heatmap_warp_i, self.heatmap_warp_j], 
+									feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.weights: weight_train, self.bbox: bbox_train})
+							else:
+								_, cur_loss, cur_geometry_loss, gt_loss = self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss, self.gt_loss], 
+									feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.weights: weight_train, self.bbox: bbox_train})
 						else:
-							_, cur_loss, cur_geometry_loss = self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss], 
-								feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.bbox: bbox_train})
+							
+							# DEBUGGER
+							if debug:
+								_, cur_loss, cur_geometry_loss, gt_loss, Hh_i_matrix, Hh_j_matrix, heatmap_src_i, heatmap_src_j, heatmap_warp_i, heatmap_warp_j = \
+									self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss, self.gt_loss, self.Hh_i_matrix, self.Hh_j_matrix, 
+										self.heatmap_src_i, self.heatmap_src_j, self.heatmap_warp_i, self.heatmap_warp_j], 
+									feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.bbox: bbox_train})
+							else:
+								_, cur_loss, cur_geometry_loss, gt_loss = self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss, self.gt_loss], 
+									feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.bbox: bbox_train})
+
 					cost += cur_loss
 					avg_cost += cur_loss/epochSize
-					print(' [*] In Epoch {}, Loop {}, geometry loss is {}, total loss is {}'.format(epoch, i, cur_geometry_loss, cur_loss))
+					print(' [*] In Epoch {}, Loop {}, geometry loss is {}, ground truth loss is {}, total loss is {}'.format(epoch, i, cur_geometry_loss, gt_loss, cur_loss))
 				epochfinishTime = time.time()
 				
 				# Save Weight (axis = epoch) for all the conv
@@ -894,7 +924,8 @@ class HourglassModel():
 	
 	def _accur(self, pred, gtMap, num_image):
 		""" Given a Prediction batch (pred) and a Ground Truth batch (gtMaps)
-		for a single joint in each image of the batch(average in these images)
+		for a single joint in each image-pair of the batch(average in these images)
+		and sum over all the view
 		returns one minus the mean distance.
 		Args:
 			pred		: Prediction Batch (shape = num_image x 64 x 64)
@@ -908,7 +939,7 @@ class HourglassModel():
 			for view in range(4):
 				err = tf.add(err, self._compute_err(pred[i][view], gtMap[i][view]))
 			# err is the distance-> bigger err means lower accurancy-> we need to 1-err
-		return tf.subtract(tf.to_float(1), err/num_image)
+		return tf.subtract(tf.to_float(1), err/(num_image*4))
 
 	def _compute_err(self, u, v):
 		""" Given 2 tensors compute the euclidean distance (L2) between maxima locations

@@ -69,7 +69,6 @@ if __name__ == '__main__':
 	dataset = DataGenerator(joints_name = params['joint_list'],img_dir = params['img_directory'], train_data_file = params['training_txt_file'],
 							camera_extrinsic = params['camera_extrinsic'], camera_intrinsic = params['camera_intrinsic'])
 	dataset._create_train_table()
-
 	# nfeats:256, nstacks:4 nmodules:1(not used)
 	# nlow:4 (Number of downsampling in one stack)
 	# mcam:false (attention system(not needed))
