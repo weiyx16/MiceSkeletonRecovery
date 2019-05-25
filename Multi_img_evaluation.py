@@ -20,6 +20,7 @@ import tensorflow as tf
 import cv2
 
 Palette = [(0, 0, 255), (255, 0, 0), (0, 255, 0), (255, 0, 255), (0, 255, 255)]
+predictJoints = False
 
 def show_prections(img, predictions, name):
     for index, coord in enumerate(predictions):
@@ -51,7 +52,15 @@ if __name__ == '__main__':
         img_crop = np.copy(img)[bbox[1]:bbox[1]+size, bbox[0]:bbox[0]+size]
         img_resize = cv2.resize(img_crop, (256, 256))
         #test_img = cv2.cvtColor(test_img, cv2.COLOR_BGR2RGB)
-        predictions = model.predictJoints(img_resize, mode='gpu')
-        print(' Predict on {}' .format(img_path))
-        print(np.add(np.asarray(predictions)*(bbox[1]-bbox[0])/256, np.array([bbox[0], bbox[2]])))
-        show_prections(img_resize, predictions, img_path[0:-4] + '_pred' + img_path[-4:])
+        if predictJoints:
+            predictions = model.predictJoints(img_resize, mode='gpu')
+            print(' Predict on {}' .format(img_path))
+            print(np.add(np.asarray(predictions)*(bbox[1]-bbox[0])/256, np.array([bbox[0], bbox[2]])))
+            show_prections(img_resize, predictions, img_path[0:-4] + '_pred' + img_path[-4:])
+        else:
+            # output heatmap = 1*64 x 64 x outputDim
+            out_heatmap = np.squeeze(model.predictHM(img_resize))
+            for i in range(out_heatmap.shape[2]):
+                joint_hm = np.asarray(cv2.resize(255 * out_heatmap[:,:,i], (256, 256)), dtype=np.uint8)
+                joint_hm = cv2.applyColorMap(joint_hm, cv2.COLORMAP_JET)
+                cv2.imwrite(os.path.join(params['test_result_directory'] , img_path[0:-4] + '_pred_joint' + str(i) + img_path[-4:]), 0.5*img_resize+0.5*joint_hm)
