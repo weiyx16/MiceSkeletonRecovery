@@ -75,7 +75,7 @@ class HourglassModel():
 		self.w_loss = w_loss
 		self.gpu_frac = gpu_frac
 		self.saver = None
-	
+		self.lambda_geo = 100
 	"""
 	# ---------------- Self-Parameters Accessor --------------
 	"""
@@ -170,7 +170,10 @@ class HourglassModel():
 				else:
 					self.gt_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.output, labels= self.gtMaps), name= 'cross_entropy_loss')
 				# Introduce reprojection loss 
-				self.geometry_loss = tf.reduce_mean(self.camera_reproject_loss(), name='reduced_camera_reproject_loss')
+				if self.training:
+					self.geometry_loss = self.lambda_geo * tf.reduce_mean(self.camera_reproject_loss(), name='reduced_camera_reproject_loss')
+				else:
+					self.geometry_loss = self.gt_loss
 				self.loss = tf.add(self.gt_loss, self.geometry_loss)
 			lossTime = time.time()	
 			print('-- Model Loss : Done (' + str(int(abs(lossTime-graphTime))) + ' sec.)')
@@ -319,10 +322,16 @@ class HourglassModel():
 					v_j = tf.add(a*v, b)
 					v_j = tf.cast(tf.floor(tf.clip_by_value(v_j, 0.0, output_shape[4]-1)), 'int32')
 					v_j = tf.reshape(v_j, (v_j.shape[0], 1))
-					Q_hat_i = tf.reduce_max(self.heatmap_warp_i, axis = 1)
-					Q_hat_j = tf.reduce_max(tf.gather_nd(self.heatmap_warp_j, v_j), axis = 1)
+					# Notice add sigmoid on final output to avoid 0*log(0/c) a little different from source definition
+					Q_hat_i = tf.nn.sigmoid(tf.reduce_max(self.heatmap_warp_i, axis = 1)) # rescale to (0~1)
+					Q_hat_j = tf.nn.sigmoid(tf.reduce_max(tf.gather_nd(self.heatmap_warp_j, v_j), axis = 1))
 					# Calculate loss
-					cur_project_loss += tf.reduce_sum(-Q_hat_i*tf.log(tf.clip_by_value(tf.div(Q_hat_i, Q_hat_j),1e-10,1.0)))
+					cur_project_loss += tf.reduce_sum(-Q_hat_i*tf.log(tf.clip_by_value(tf.div_no_nan(Q_hat_i, Q_hat_j),1e-10,1.0)))
+					#tf.distributions.kl_divergence(tf.distributions.Categorical(Q_hat_i), tf.distributions.Categorical(Q_hat_j), allow_nan_stats = False)
+					#maybe your should normalization the Q to Sum(Q)==1 (a PDF)
+					#or use softmax to convert the Q into a distritbution with probability
+					#Or use softmax_cross_entropy_with_logits directly for someone prove that KL and SCE is only gapped by a const
+
 			self.project_loss.append(cur_project_loss)
 			print('-- -- Geometry Loss for No. %d' %(batch_index), ' batch')
 		self.project_loss_all = tf.stack(self.project_loss, axis=0)
@@ -617,7 +626,45 @@ class HourglassModel():
 	"""
 	# --------------- Model Eavluation --------------
 	"""
-	
+	def generate_model_eval(self):
+		""" 
+			Create the complete `model graph`
+			Including the Network model/ Loss&Optimizer/Accuracy/ Some visualization params
+			Useful in evaluation
+		"""
+		startTime = time.time()
+
+		# create the model on GPU with inputs/Model Graph/loss
+		with tf.device(self.gpu):
+			with tf.name_scope('inputs'):
+				# Shape Input Image - batchSize: None, height: 256, width: 256, channel: 3 (RGB) in NHWC format
+				# NOTICE Set 256 unchanged
+				self.img = tf.placeholder(dtype= tf.float32, shape= (None, 256, 256, 3), name = 'input_img')
+				if self.w_loss:
+					self.weights = tf.placeholder(dtype = tf.float32, shape = (None, self.outDim))
+				# Shape Ground Truth Map: batchSize x camera_view x nStack x 64 x 64 x outDim
+				# Intermediate supervision: so need multiple by nStack = 4				
+				self.gtMaps = tf.placeholder(dtype = tf.float32, shape = (None, self.nStack, 64, 64, self.outDim), name = 'groundtruth')
+				self.bbox = tf.placeholder(dtype = tf.float32, shape = (None, 4), name = 'input_crop_boundingbox')
+			inputTime = time.time()
+			print('-- Model Inputs : Done (' + str(int(abs(inputTime-startTime))) + ' sec.)')
+
+			self.output = self._graph_hourglass(self.img)
+			graphTime = time.time()
+			print('-- Model Graph : Done (' + str(int(abs(graphTime-inputTime))) + ' sec.)')
+
+		self.init = tf.global_variables_initializer()
+		initTime = time.time()
+		print('-- Model Params Initial : Done (' + str(int(abs(initTime-graphTime))) + ' sec.)')
+		
+		with tf.device(self.cpu):
+			self.saver = tf.train.Saver() #, keep_checkpoint_every_n_hours=2)
+		
+		endTime = time.time()
+		print('>>>>> Model created in (' + str(int(abs(endTime-startTime))) + ' sec.)')
+		# every time is an object and if we don't need them then remove them
+		del endTime, startTime, initTime, graphTime, inputTime		
+
 	def restore(self, pre_trained = None):
 		""" Restore a pretrained model (`During evaluation`)
 			Args:

@@ -61,7 +61,7 @@ class PredictProcessor():
 		"""
 		self.params = config_dict
 		self.HG = HourglassModel(nFeat=self.params['nfeats'], nStack=self.params['nstacks'], nModules=self.params['nmodules'], 
-			nLow=self.params['nlow'], outputDim=self.params['num_joints'], batch_size=self.params['batch_size'], training=True, 
+			nLow=self.params['nlow'], outputDim=self.params['num_joints'], batch_size=self.params['batch_size'], training=False, 
 			drop_rate= self.params['dropout_rate'], lear_rate=self.params['learning_rate'], decay=self.params['learning_rate_decay'], decay_step=self.params['decay_step'], 
 			name=self.params['name'], w_summary = True, logdir_train=self.params['log_dir_train'], logdir_test=self.params['log_dir_test'], tiny= self.params['tiny'],
 			w_loss=self.params['weighted_loss'] , joints= self.params['joint_list'], gpu_frac=self.params['gpu_frac'], model_save_dir=self.params['model_save_dir'])
@@ -145,7 +145,7 @@ class PredictProcessor():
 		"""
 		t = time()
 		with self.graph.as_default():
-			self.HG.generate_model()
+			self.HG.generate_model_eval()
 		print('>>>>> Graph Generated in ', int(time() - t), ' sec.')
 		del t
 	

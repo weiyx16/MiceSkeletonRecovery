@@ -278,7 +278,6 @@ class DataGenerator():
 			Homography_matrix_lr.append(Hr_l)
 			Homography_matrix_lr.append(Hr_r)
 			self.Rectification_Homography_Matrix.append(Homography_matrix_lr)
-		print(self.Rectification_Homography_Matrix)
 	"""
 	# ------------- Ground Truth HeatMap for each joints Creator ------------ 
 	"""
