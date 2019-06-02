@@ -84,4 +84,4 @@ if __name__ == '__main__':
 	
 	print('>>>>> Creating Hourglass Model')
 	model.generate_model()
-	model.training_init(nEpochs=params['nepochs'], epochSize=params['epoch_size'], saveStep=params['saver_step'],valid_iter=params['valid_iteration'], pre_trained = params['pretrained_model'])
+	model.training_init(nEpochs=params['nepochs'], epochSize=params['epoch_size'], saveStep=params['saver_step'],valid_iter=params['valid_iteration'], pre_trained = params['pretrained_model'], human_pretrained_model = params['human_pretrained_model'])

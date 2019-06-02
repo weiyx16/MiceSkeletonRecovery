@@ -18,7 +18,7 @@ import datetime
 import os
 import cv2
 from tqdm import tqdm
-from skimage.transform import ProjectiveTransform, warp
+# from skimage.transform import ProjectiveTransform, warp
 
 debug = False
 
@@ -75,7 +75,7 @@ class HourglassModel():
 		self.w_loss = w_loss
 		self.gpu_frac = gpu_frac
 		self.saver = None
-		self.lambda_geo = 100
+		self.lambda_geo = 10
 	"""
 	# ---------------- Self-Parameters Accessor --------------
 	"""
@@ -160,6 +160,7 @@ class HourglassModel():
 				self.output_list.append(self._graph_hourglass(self.img[:,i,:,:,:]))
 				print('-- -- Model Graph for No. %d' %(i), ' View')
 			self.output = tf.stack(self.output_list, axis=1)
+			# self.output = self._graph_hourglass(self.img) 
 			graphTime = time.time()
 			print('-- Model Graph : Done (' + str(int(abs(graphTime-inputTime))) + ' sec.)')
 
@@ -170,10 +171,9 @@ class HourglassModel():
 				else:
 					self.gt_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.output, labels= self.gtMaps), name= 'cross_entropy_loss')
 				# Introduce reprojection loss 
-				if self.training:
-					self.geometry_loss = self.lambda_geo * tf.reduce_mean(self.camera_reproject_loss(), name='reduced_camera_reproject_loss')
-				else:
-					self.geometry_loss = self.gt_loss
+				# if occur the problem that: “python train_launcher.py” terminated by signal SIGKILL (Forced quit)
+				# use smaller batch size for the problem of both the shortage of cpu/gpu memory
+				self.geometry_loss = self.lambda_geo * tf.reduce_mean(self.camera_reproject_loss(), name='reduced_camera_reproject_loss')
 				self.loss = tf.add(self.gt_loss, self.geometry_loss)
 			lossTime = time.time()	
 			print('-- Model Loss : Done (' + str(int(abs(lossTime-graphTime))) + ' sec.)')
@@ -229,14 +229,28 @@ class HourglassModel():
 				for i in range(len(self.joints)):
 					tf.summary.scalar(self.joints[i], self.joint_accur[i], collections = ['train', 'test'])
 		
+		# gather parameter needed to restore
+		#得到该网络中，所有可以加载的参数，用于载入部分预训练的权重
+		variables = tf.contrib.framework.get_variables_to_restore()
+		self.variables_to_restore_full = variables
+		self.variables_to_restore = []
+		#删除output层中的参数 因为预训练的模型输出关节数和实际训练的不大一样
+		#删除batchnorm中的参数，因为预训练的模型没有模型重用的操作，所以导致这部分的参数函数名都不一样，无法载入
+		for v in variables:
+			v_split = v.name.split('/')
+			if 'out' not in v_split and 'out_' not in v_split:
+				if v_split[-1]!='beta:0' and v_split[-2]!='beta' and v_split[-1]!='moving_mean:0' and v_split[-1]!='moving_variance:0':
+					#if 'RMSProp:0' not in v_split and 'RMSProp_1:0' not in v_split:
+					self.variables_to_restore.append(v)
+
 		with tf.device(self.cpu):
-			self.saver = tf.train.Saver() #, keep_checkpoint_every_n_hours=2)
+			self.saver = tf.train.Saver(self.variables_to_restore_full) #, keep_checkpoint_every_n_hours=2)
 		
 		with tf.device(self.gpu):
 			self.train_summary = tf.summary.FileWriter(self.logdir_train, tf.get_default_graph())
 			self.test_summary = tf.summary.FileWriter(self.logdir_test)
 			#self.weight_summary = tf.summary.FileWriter(self.logdir_train, tf.get_default_graph()) # don't write down the summary of weighs for now
-		
+
 		summTime = time.time()
 		print('-- Model Saver & Summary : Done (' + str(int(abs(summTime-initTime))) + ' sec.)')
 		# use merge_all to (use to merge all ops/scalar/histogram to save in the train collection)
@@ -292,21 +306,20 @@ class HourglassModel():
 				# Hh is defined on two-paired heatmaps (and its coordinate)
 				# but the Hr is defined on two-paired source size image (and its coordinate)
 				Hr_i = self.dataset.Rectification_Homography_Matrix[pair_index][0]
-				self.Hh_i_matrix = self._warp_matrix(self.bbox[batch_index,camera_view_i,:], Hr_i)
+				Hh_i_matrix = self._warp_matrix(self.bbox[batch_index,camera_view_i,:], Hr_i)
 				Hr_j = self.dataset.Rectification_Homography_Matrix[pair_index][1]
-				self.Hh_j_matrix = self._warp_matrix(self.bbox[batch_index,camera_view_j,:], Hr_j)
+				Hh_j_matrix = self._warp_matrix(self.bbox[batch_index,camera_view_j,:], Hr_j)
 				#for stack_index in range(output_shape[2]):
 				# Only calculate on the final stack for now
 				for joint_index in range(output_shape[5]):
 					# Each_joints
 					# warp images 
-					# test_matrix = np.eye(3); test_matrix[0,2] = 10; test_matrix = tf.convert_to_tensor(test_matrix)	
 					self.heatmap_src_i = self.output[batch_index,camera_view_i, output_shape[2]-1, :,:,joint_index]
 					# self.heatmap_warp_i = warp(np.asarray(self.heatmap_src_i), np.asarray(tf.matrix_inverse(Hh_i_matrix)))
-					self.heatmap_warp_i = self._warp_img(self.heatmap_src_i, self.Hh_i_matrix)
+					self.heatmap_warp_i = self._warp_img(self.heatmap_src_i, Hh_i_matrix)
 					self.heatmap_src_j = self.output[batch_index,camera_view_j, output_shape[2]-1, :,:,joint_index]
 					# self.heatmap_warp_j = warp(np.asarray(self.heatmap_src_j), np.asarray(tf.matrix_inverse(Hh_j_matrix)))
-					self.heatmap_warp_j = self._warp_img(self.heatmap_src_j, self.Hh_j_matrix)							
+					self.heatmap_warp_j = self._warp_img(self.heatmap_src_j, Hh_j_matrix)							
 					
 					# print('For current pair and joint %d image pairs warp done' %(joint_index))
 					# a, b: for every v in warped image i: av+b is coorsponding row in warped image j
@@ -507,8 +520,8 @@ class HourglassModel():
 						if self.w_loss:
 							# DEBUGGER
 							if debug:
-								_, cur_loss, cur_geometry_loss, gt_loss, Hh_i_matrix, Hh_j_matrix, heatmap_src_i, heatmap_src_j, heatmap_warp_i, heatmap_warp_j = \
-									self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss, self.gt_loss, self.Hh_i_matrix, self.Hh_j_matrix, 
+								_, cur_loss, cur_geometry_loss, gt_loss, heatmap_src_i, heatmap_src_j, heatmap_warp_i, heatmap_warp_j = \
+									self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss, self.gt_loss, 
 										self.heatmap_src_i, self.heatmap_src_j, self.heatmap_warp_i, self.heatmap_warp_j], 
 									feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.weights: weight_train, self.bbox: bbox_train})
 							else:
@@ -518,8 +531,8 @@ class HourglassModel():
 							
 							# DEBUGGER
 							if debug:
-								_, cur_loss, cur_geometry_loss, gt_loss, Hh_i_matrix, Hh_j_matrix, heatmap_src_i, heatmap_src_j, heatmap_warp_i, heatmap_warp_j = \
-									self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss, self.gt_loss, self.Hh_i_matrix, self.Hh_j_matrix, 
+								_, cur_loss, cur_geometry_loss, gt_loss, heatmap_src_i, heatmap_src_j, heatmap_warp_i, heatmap_warp_j = \
+									self.Session.run([self.train_rmsprop, self.loss, self.geometry_loss, self.gt_loss, 
 										self.heatmap_src_i, self.heatmap_src_j, self.heatmap_warp_i, self.heatmap_warp_j], 
 									feed_dict = {self.img : img_train, self.gtMaps: gt_train, self.bbox: bbox_train})
 							else:
@@ -543,12 +556,12 @@ class HourglassModel():
 				print('\n-- Epoch ' + str(epoch) + '/' + str(nEpochs) + ' done in ' + str(int(epochfinishTime-epochstartTime)) + ' sec.\n'
 					 + ' - time_per_batch: ' + str(((epochfinishTime-epochstartTime)/epochSize))[:4] + ' sec.', ' - cost_per_batch: ' + str(avg_cost))
 
-				if cost < 1.2 * min_cost:
+				if avg_cost < 1.2 * min_cost:
 					# Save model for each epoch
 					with tf.name_scope('save'):
 						self.saver.save(self.Session, os.path.join(self.model_save_dir, str(self.name)), global_step=epoch+1)
-					min_cost = min(cost, min_cost)
-				print('-- Saving new model with average cost: {}\n'.format(avg_cost))
+					min_cost = min(avg_cost, min_cost)
+					print('-- Saving new model with average cost: {}\n'.format(avg_cost))
 
 				self.resume['loss'].append(cost)
 				
@@ -572,7 +585,7 @@ class HourglassModel():
 			# print('-- Relative Accurancy Improvement: ' + str((self.resume['err'][-1] - self.resume['err'][0]) * 100) +'%')
 			print('-- Training Time: ' + str(datetime.timedelta(seconds=time.time() - startTime)))
 			
-	def training_init(self, nEpochs = 100, epochSize = 100, saveStep = 20, valid_iter = 10, pre_trained = None):
+	def training_init(self, nEpochs = 100, epochSize = 100, saveStep = 20, valid_iter = 10, pre_trained = None, human_pretrained_model = None):
 		""" Initialize the training process (And into _train():the true training function)
 
 		Args:
@@ -581,12 +594,19 @@ class HourglassModel():
 			saveStep		: Step to save 'train' summary (has to be lower than epochSize)
 			valid_iter		: Step to apply validation steps
 			pre_trained			: Pre-trained Model to load (None if training from scratch) (see README for further information)
+			human_pretrained_model : Human-Pre-trained Model on human pose estimation dataset
 		"""
 		print(">>>>> Begin setting the training process!")
 		with tf.name_scope('Session'):
+			
+			if pre_trained is None and human_pretrained_model is not None:
+				with tf.device(self.cpu):
+					presaver = tf.train.Saver(self.variables_to_restore)
+
 			with tf.device(self.gpu):
 				self._init_weight()
 				self._define_saver_summary()
+				
 				if pre_trained is not None:
 					try:
 						print('-- Loading Pre-trained Model')
@@ -601,6 +621,20 @@ class HourglassModel():
 						del load_t
 					except Exception:
 						print('-- Pre-trained model Loading Failed!')
+				else:
+					if human_pretrained_model is not None:	
+						#try:
+						print('-- Loading Human-pre-trained Model')
+						load_t = time.time()
+						#self.saver.restore(self.Session, human_pretrained_model)
+						presaver.restore(self.Session, human_pretrained_model)
+						print('-- Human-Pre-trained Model Loaded (', time.time() - load_t,' sec.)')
+						del load_t
+						#self.saver.save(self.Session, os.path.join(self.model_save_dir, str(self.name)), global_step=1)
+						#except Exception:
+						#print('-- Human-Pre-trained model Loading Failed!')
+					else:
+						print('-- No pretrained model loaded using initial parameters!')
 				self._train(nEpochs, epochSize, saveStep, validIter=valid_iter)
 		
 	def _define_saver_summary(self, summary = True):
@@ -746,7 +780,11 @@ class HourglassModel():
 							else:
 								hg[i] = self._hourglass(sum_[i-1], self.nLow, self.nFeat, 'hourglass')
 							drop[i] = tf.layers.dropout(hg[i], rate = self.dropout_rate, training = self.training, name = 'dropout')
-							ll[i] = self._conv_bn_relu(drop[i], self.nFeat, 1, 1, name= 'll')
+							if i == self.nStack - 1:
+								# use this name to load pretrained model on human dataset provided by wbenbihi
+								ll[i] = self._conv_bn_relu(drop[i], self.nFeat, 1, 1, name = 'conv')  
+							else:
+								ll[i] = self._conv_bn_relu(drop[i], self.nFeat, 1, 1, name= 'll')
 							out[i] = self._conv(ll[i], self.outDim, 1, 1, 'out') # Output level i
 							if i < self.nStack - 1:  # We don't need out_ and sum_ for the last stack (stack 3)
 								out_[i] = self._conv(out[i], self.nFeat, 1, 1, 'out_')
@@ -806,11 +844,11 @@ class HourglassModel():
 			# Kernel for convolution, Xavier Initialisation
 			# initialize the kernel weight using xavier method
 			try:
-				kernel = tf.get_variable(name+'_weights', initializer = tf.contrib.layers.xavier_initializer(uniform=False)([kernel_size, kernel_size, inputs.get_shape().as_list()[1], filters]))
+				kernel = tf.get_variable('weights', initializer = tf.contrib.layers.xavier_initializer(uniform=False)([kernel_size, kernel_size, inputs.get_shape().as_list()[1], filters]))
 			except ValueError:
 				# print('reuse variables here')
 				scope.reuse_variables()
-				kernel = tf.get_variable(name+'_weights')
+				kernel = tf.get_variable('weights')
 			
 			conv = tf.nn.conv2d(inputs, kernel, [1,1,strides,strides], padding='VALID', data_format='NCHW')
 			if self.w_summary:
@@ -834,10 +872,10 @@ class HourglassModel():
 		with tf.variable_scope(name) as scope:
 			# initialize the kernel weight using xavier method
 			try:
-				kernel = tf.get_variable(name+'_weights', initializer = tf.contrib.layers.xavier_initializer(uniform=False)([kernel_size,kernel_size, inputs.get_shape().as_list()[1], filters]))
+				kernel = tf.get_variable('weights', initializer = tf.contrib.layers.xavier_initializer(uniform=False)([kernel_size,kernel_size, inputs.get_shape().as_list()[1], filters]))
 			except ValueError:
 				scope.reuse_variables()
-				kernel = tf.get_variable(name+'_weights')
+				kernel = tf.get_variable('weights')
 			
 			conv = tf.nn.conv2d(inputs, kernel, [1,1,strides,strides], padding='VALID', data_format='NCHW')
 			norm = tf.contrib.layers.batch_norm(conv, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training, data_format='NCHW', reuse=tf.AUTO_REUSE, scope=scope)
@@ -880,14 +918,14 @@ class HourglassModel():
 		else:
 			with tf.variable_scope(name) as scope:
 				# Standard convolution in the paper with kernel size [1 -> 3 -> 1]
-				with tf.variable_scope(name+'norm_1'):
+				with tf.variable_scope('norm_1'):
 					norm_1 = tf.contrib.layers.batch_norm(inputs, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training, data_format='NCHW', reuse=tf.AUTO_REUSE, scope=scope)
 					conv_1 = self._conv(norm_1, int(numOut/2), kernel_size=1, strides=1, name= 'conv')
-				with tf.variable_scope(name+'norm_2'):
+				with tf.variable_scope('norm_2'):
 					norm_2 = tf.contrib.layers.batch_norm(conv_1, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training, data_format='NCHW', reuse=tf.AUTO_REUSE, scope=scope)
 					pad = tf.pad(norm_2, np.array([[0,0],[0,0],[1,1],[1,1]]), name= 'pad')
 					conv_2 = self._conv(pad, int(numOut/2), kernel_size=3, strides=1, name= 'conv')
-				with tf.variable_scope(name+'norm_3'):
+				with tf.variable_scope('norm_3'):
 					norm_3 = tf.contrib.layers.batch_norm(conv_2, 0.9, epsilon=1e-5, activation_fn = tf.nn.relu, is_training = self.training, data_format='NCHW', reuse=tf.AUTO_REUSE, scope=scope)
 					conv_3 = self._conv(norm_3, int(numOut), kernel_size=1, strides=1, name= 'conv')
 				return conv_3
@@ -934,7 +972,7 @@ class HourglassModel():
 			numOut	: Number of Output Features (channels)
 			name	: Name of the block
 		"""
-		with tf.variable_scope(str(n)+name):
+		with tf.variable_scope(name):
 			# Upper Branch
 			up_1 = self._residual(inputs, numOut, name = 'up_1')
 			# Lower Branch
